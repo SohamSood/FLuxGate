@@ -1,0 +1,109 @@
+package com.fluxgate.config;
+
+import org.springframework.boot.context.properties.ConfigurationProperties;
+
+import java.util.ArrayList;
+import java.util.List;
+
+/**
+ * Configuration properties for FluxGate reverse proxy and load balancer.
+ */
+@ConfigurationProperties(prefix = "fluxgate")
+public class FluxGateProperties {
+
+    /**
+     * List of backend URLs (e.g. "http://localhost:8081", "http://localhost:8082").
+     */
+    private List<String> backends = new ArrayList<>(List.of(
+            "http://localhost:8081",
+            "http://localhost:8082",
+            "http://localhost:8083"
+    ));
+
+    private HealthCheck healthCheck = new HealthCheck();
+    private Proxy proxy = new Proxy();
+
+    public List<String> getBackends() {
+        return backends;
+    }
+
+    public void setBackends(List<String> backends) {
+        this.backends = backends;
+    }
+
+    public HealthCheck getHealthCheck() {
+        return healthCheck;
+    }
+
+    public void setHealthCheck(HealthCheck healthCheck) {
+        this.healthCheck = healthCheck;
+    }
+
+    public Proxy getProxy() {
+        return proxy;
+    }
+
+    public void setProxy(Proxy proxy) {
+        this.proxy = proxy;
+    }
+
+    public static class HealthCheck {
+        private boolean enabled = true;
+        private long intervalMs = 10000;
+        private int timeoutMs = 2000;
+        private String healthPath = "/health";
+
+        public boolean isEnabled() {
+            return enabled;
+        }
+
+        public void setEnabled(boolean enabled) {
+            this.enabled = enabled;
+        }
+
+        public long getIntervalMs() {
+            return intervalMs;
+        }
+
+        public void setIntervalMs(long intervalMs) {
+            this.intervalMs = intervalMs;
+        }
+
+        public int getTimeoutMs() {
+            return timeoutMs;
+        }
+
+        public void setTimeoutMs(int timeoutMs) {
+            this.timeoutMs = timeoutMs;
+        }
+
+        public String getHealthPath() {
+            return healthPath;
+        }
+
+        public void setHealthPath(String healthPath) {
+            this.healthPath = healthPath;
+        }
+    }
+
+    public static class Proxy {
+        private int connectTimeoutMs = 3000;
+        private int readTimeoutMs = 10000;
+
+        public int getConnectTimeoutMs() {
+            return connectTimeoutMs;
+        }
+
+        public void setConnectTimeoutMs(int connectTimeoutMs) {
+            this.connectTimeoutMs = connectTimeoutMs;
+        }
+
+        public int getReadTimeoutMs() {
+            return readTimeoutMs;
+        }
+
+        public void setReadTimeoutMs(int readTimeoutMs) {
+            this.readTimeoutMs = readTimeoutMs;
+        }
+    }
+}
