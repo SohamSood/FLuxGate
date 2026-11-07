@@ -1,0 +1,12 @@
+{
+  "name": "fluxgate-demo-backend",
+  "version": "1.0.0",
+  "description": "Lightweight mock backend service for testing FluxGate reverse proxy and load balancing",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "keywords": ["fluxgate", "backend", "load-balancer", "proxy"],
+  "author": "Soham Sood",
+  "license": "MIT"
+}

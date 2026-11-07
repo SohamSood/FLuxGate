@@ -1,6 +1,33 @@
 # 🛡️ FluxGate
 
+<div align="center">
+
+[![Render Live Deployment](https://img.shields.io/badge/Render-Live%20Deployment-46E3B7?style=for-the-badge&logo=render&logoColor=white)](https://fluxgate-bvjt.onrender.com/fluxgate/health)
+[![Java 21](https://img.shields.io/badge/Java-21%20LTS-ED8B00?style=for-the-badge&logo=openjdk&logoColor=white)](https://openjdk.org/)
+[![Spring Boot](https://img.shields.io/badge/Spring%20Boot-3.4.2-6DB33F?style=for-the-badge&logo=springboot&logoColor=white)](https://spring.io/projects/spring-boot)
+[![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?style=for-the-badge&logo=docker&logoColor=white)](https://www.docker.com/)
+
+<p align="center">
+  <b>🌐 Live Render Deployment: <a href="https://fluxgate-bvjt.onrender.com/fluxgate/health">https://fluxgate-bvjt.onrender.com</a></b>
+</p>
+
+</div>
+
+---
+
 **FluxGate** is a lightweight, high-performance Java reverse proxy and load balancing system built with **Spring Boot 3** and **Java 21**. It acts as a unified ingress gateway for application traffic, intelligently distributing incoming HTTP requests across backend servers using thread-safe Round Robin load balancing, automated periodic health checking, and fault-tolerant error handling.
+
+---
+
+## 🌐 Live Preview & Endpoints
+
+FluxGate is actively deployed on **Render**:
+
+| Endpoint | Method | Live Link | Description |
+| :--- | :---: | :--- | :--- |
+| **FluxGate Health** | `GET` | [`/fluxgate/health`](https://fluxgate-bvjt.onrender.com/fluxgate/health) | Reports proxy operational status & healthy backend count |
+| **Backend Metrics** | `GET` | [`/fluxgate/status`](https://fluxgate-bvjt.onrender.com/fluxgate/status) | Real-time health state, latency, and request distribution |
+| **Proxy Gateway** | `GET` | [`/hello`](https://fluxgate-bvjt.onrender.com/hello) | Load-balanced forwarding to upstream backend instances |
 
 ---
 
@@ -20,7 +47,7 @@ Clients  ──────▶ [ FluxGate:8080 ] ──────────�
                                     └────────────────────────┘  └────────────────────────┘
 ```
 
-1. **Client Ingress**: FluxGate listens on port `8080` (or dynamic `${PORT}` on cloud providers).
+1. **Client Ingress**: FluxGate listens on port `8080` (or dynamic `${PORT}` on cloud providers like Render).
 2. **Strategy Selection**: Selects a healthy backend server using a thread-safe **Round Robin** algorithm.
 3. **Transparent Proxying**: Forwards the exact HTTP method, path, query parameters, headers, and request body, appending standard `X-Forwarded-*` headers.
 4. **Health Monitoring**: Probes `/health` on all registered backends periodically, isolating unhealthy instances automatically.
@@ -48,9 +75,16 @@ Clients  ──────▶ [ FluxGate:8080 ] ──────────�
 
 ```text
 Projects/Flux_Gate/
-├── Dockerfile                      # Multi-stage production container build
-├── docker-compose.yml              # Local testing with 3 whoami backends
+├── Dockerfile                      # FluxGate multi-stage container build
+├── docker-compose.yml              # Local testing cluster (FluxGate + 3 demo backends)
 ├── pom.xml                         # Spring Boot 3.4.2 & Java 21 configuration
+│
+├── demo-backend/                   # Independent demo backend service for testing
+│   ├── Dockerfile                  # Lightweight Node.js container
+│   ├── package.json                # Zero-dependency HTTP service
+│   ├── server.js                   # Handles /health, /hello, and request echo
+│   └── README.md
+│
 └── src/
     ├── main/
     │   ├── java/com/fluxgate/
@@ -83,30 +117,9 @@ Projects/Flux_Gate/
 
 ## 🚀 Running Locally
 
-### Option 1: Native Maven (Local JVM)
+### Option 1: Docker Compose (Full Cluster Test)
 
-**Prerequisites**: Java 21 JDK installed.
-
-1. **Clone the repository**:
-   ```bash
-   git clone https://github.com/SohamSood/FLuxGate.git
-   cd FLuxGate
-   ```
-2. **Build and test**:
-   ```bash
-   ./mvnw clean test
-   ```
-3. **Run the proxy**:
-   ```bash
-   ./mvnw spring-boot:run
-   ```
-   *FluxGate will start on port `8080` forwarding to the configured backends.*
-
----
-
-### Option 2: Docker Compose (Recommended for Complete Local Testing)
-
-A complete local cluster featuring **FluxGate** and **3 independent backend instances** (`traefik/whoami` on ports 8081, 8082, 8083) is included:
+Run FluxGate and **3 backend instances** with a single command:
 
 ```bash
 docker-compose up --build
@@ -114,18 +127,93 @@ docker-compose up --build
 
 **Test Round Robin load balancing**:
 ```bash
-curl http://localhost:8080/
+curl http://localhost:8080/hello
 ```
-*Run it multiple times — notice the returned `Hostname` alternate between `fluxgate-backend-1`, `fluxgate-backend-2`, and `fluxgate-backend-3`.*
+*Run it multiple times — notice the response alternate across `backend-1`, `backend-2`, and `backend-3`.*
 
 ---
 
-## ⚙️ Configuration & Environment Variables
+### Option 2: Native Execution
+
+1. **Start the 3 demo backends** (in separate terminals or background):
+   ```bash
+   cd demo-backend
+   PORT=8081 SERVER_NAME=backend-1 node server.js
+   PORT=8082 SERVER_NAME=backend-2 node server.js
+   PORT=8083 SERVER_NAME=backend-3 node server.js
+   ```
+
+2. **Start FluxGate**:
+   ```bash
+   ./mvnw spring-boot:run
+   ```
+
+---
+
+## 🌐 Deploying 3 Backend Instances on Render
+
+The repository includes a dedicated, zero-dependency demo backend in [`demo-backend/`](demo-backend/) designed specifically for instant deployment on Render.
+
+Follow these steps to deploy **3 independent backend instances**:
+
+### Step 1: Deploy Backend 1
+1. Log in to [Render Dashboard](https://dashboard.render.com).
+2. Click **New +** → **Web Service**.
+3. Connect your repository: **`SohamSood/FLuxGate`**.
+4. Configure service settings:
+   - **Name**: `fluxgate-backend-1`
+   - **Language / Runtime**: `Docker`
+   - **Root Directory**: `demo-backend`  *(⚠️ Important: specifies the subfolder)*
+   - **Region**: Same region as your FluxGate service
+   - **Instance Type**: `Free`
+5. Under **Environment Variables**, add:
+   - `SERVER_NAME` = `backend-1`
+6. Click **Create Web Service**. Note the deployed URL (e.g., `https://fluxgate-backend-1.onrender.com`).
+
+---
+
+### Step 2: Deploy Backend 2 & Backend 3
+Repeat the exact same steps twice:
+- **Backend 2**:
+  - **Name**: `fluxgate-backend-2`
+  - **Root Directory**: `demo-backend`
+  - **Environment Variable**: `SERVER_NAME` = `backend-2`
+- **Backend 3**:
+  - **Name**: `fluxgate-backend-3`
+  - **Root Directory**: `demo-backend`
+  - **Environment Variable**: `SERVER_NAME` = `backend-3`
+
+---
+
+### Step 3: Connect Backends to FluxGate on Render
+Once all three backends are live:
+
+1. Open your existing **`fluxgate-bvjt`** service on Render.
+2. Navigate to the **Environment** tab.
+3. Add or update the **`FLUXGATE_BACKENDS`** variable:
+   ```text
+   FLUXGATE_BACKENDS = https://fluxgate-backend-1.onrender.com,https://fluxgate-backend-2.onrender.com,https://fluxgate-backend-3.onrender.com
+   ```
+4. Click **Save Changes**. Render will automatically redeploy FluxGate.
+5. Check [`https://fluxgate-bvjt.onrender.com/fluxgate/health`](https://fluxgate-bvjt.onrender.com/fluxgate/health) — you will see:
+   ```json
+   {
+     "status": "UP",
+     "service": "FluxGate",
+     "healthyBackends": 3,
+     "totalBackends": 3
+   }
+   ```
+6. Now visit [`https://fluxgate-bvjt.onrender.com/hello`](https://fluxgate-bvjt.onrender.com/hello) and refresh — you will see responses seamlessly cycle between **`backend-1`**, **`backend-2`**, and **`backend-3`**!
+
+---
+
+## ⚙️ Configuration Reference
 
 | Variable | Property Key | Default | Description |
 | :--- | :--- | :--- | :--- |
-| `PORT` | `server.port` | `8080` | Port FluxGate listens on (automatically injected by Render) |
-| `FLUXGATE_BACKENDS` | `fluxgate.backends` | `http://localhost:8081,http://localhost:8082,http://localhost:8083` | Comma-separated list of backend URLs |
+| `PORT` | `server.port` | `8080` | Port FluxGate listens on (injected automatically by Render) |
+| `FLUXGATE_BACKENDS` | `fluxgate.backends` | `http://localhost:8081,http://localhost:8082,http://localhost:8083` | Comma-separated upstream backend URLs |
 | `FLUXGATE_HEALTH_CHECK_ENABLED` | `fluxgate.health-check.enabled` | `true` | Enable/disable background health checking |
 | `FLUXGATE_HEALTH_CHECK_INTERVAL_MS`| `fluxgate.health-check.interval-ms` | `10000` | Health check probe interval (ms) |
 | `FLUXGATE_HEALTH_CHECK_TIMEOUT_MS` | `fluxgate.health-check.timeout-ms` | `2000` | Probe timeout before marking unhealthy (ms) |
@@ -133,47 +221,7 @@ curl http://localhost:8080/
 
 ---
 
-## 🌐 Deploying to Render
-
-Deploying FluxGate as a Docker Web Service on Render takes under 2 minutes:
-
-1. **Push your code to GitHub**:
-   Ensure your latest code is on branch `main` at `https://github.com/SohamSood/FLuxGate`.
-2. **Create New Web Service on Render**:
-   - Go to [dashboard.render.com](https://dashboard.render.com).
-   - Click **New +** → **Web Service**.
-   - Connect your **`FLuxGate`** repository.
-3. **Configure the Service**:
-   - **Environment**: `Docker`
-   - **Region**: Choose the region closest to your backends.
-   - **Branch**: `main`
-   - Render automatically detects the `Dockerfile` at the root.
-4. **Set Environment Variables**:
-   Under the **Environment Variables** tab, add your live upstream backend URLs:
-   - `FLUXGATE_BACKENDS` = `https://api-1.example.com,https://api-2.example.com,https://api-3.example.com`
-   *(Note: Render automatically injects the `PORT` environment variable; FluxGate binds to it automatically).*
-5. **Health Check Path**:
-   - Set Health Check Path to: `/fluxgate/health`
-6. **Deploy**:
-   - Click **Create Web Service**. FluxGate will build and deploy!
-
----
-
-## 📡 API & Management Endpoints
-
-| Endpoint | Method | Description |
-| :--- | :---: | :--- |
-| `/fluxgate/health` | `GET` | Self-health check reporting `UP` and active backend count |
-| `/fluxgate/status` | `GET` | Detailed live metrics (all backends, request counts, failure reasons) |
-| `/fluxgate/backends` | `POST` | Dynamically register a new backend (`{"url": "http://new-server:8080"}`) |
-| `/fluxgate/backends?url=...` | `DELETE`| Dynamically deregister a backend instance |
-| `/**` | Any | Proxied transparently to upstream backends via Round Robin |
-
----
-
-## 🧪 Running Automated Tests
-
-FluxGate includes comprehensive unit and integration test suites covering concurrent thread-safety, request header/body fidelity, round-robin distribution, and fault tolerance:
+## 🧪 Automated Tests
 
 ```bash
 ./mvnw test
