@@ -14,3 +14,4 @@ EXPOSE ${PORT}
 USER node
 
 CMD ["node", "server.js"]
+

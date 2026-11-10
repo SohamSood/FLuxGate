@@ -36,6 +36,13 @@ public class ReverseProxyController {
             HttpServletRequest request,
             @RequestBody(required = false) byte[] body) {
 
+        String uri = request.getRequestURI();
+        if ("/".equals(uri) || "/dashboard".equals(uri)) {
+            return ResponseEntity.ok()
+                    .header("Content-Type", "text/html; charset=UTF-8")
+                    .body(DashboardController.DASHBOARD_HTML.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        }
+
         BackendServer backend = loadBalancingStrategy.select(backendRegistry.getAllBackends())
                 .orElseThrow(() -> new NoHealthyBackendException(
                         "No healthy backend instances available to handle the request: " + request.getRequestURI()));

@@ -82,8 +82,11 @@ public class ProxyService {
             long latencyMs = System.currentTimeMillis() - startTime;
             int statusCode = upstreamResponse.statusCode();
 
-            // Extract response headers
+            // Extract response headers and enrich with proxy diagnostic telemetry
             HttpHeaders responseHeaders = extractResponseHeaders(upstreamResponse.headers().map());
+            responseHeaders.set("X-Proxy-By", "FluxGate");
+            responseHeaders.set("X-Upstream-Backend", backend.getUrl());
+            responseHeaders.set("X-Proxy-Latency", latencyMs + "ms");
 
             log.info("[PROXY] Method={} Path={} Query={} Backend={} Status={} Latency={}ms",
                     method, requestUri, (queryString != null ? queryString : "-"), backend.getUrl(), statusCode, latencyMs);

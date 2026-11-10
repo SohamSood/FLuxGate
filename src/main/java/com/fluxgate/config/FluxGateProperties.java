@@ -22,6 +22,7 @@ public class FluxGateProperties {
 
     private HealthCheck healthCheck = new HealthCheck();
     private Proxy proxy = new Proxy();
+    private DemoBackends demoBackends = new DemoBackends();
 
     public List<String> getBackends() {
         return backends;
@@ -45,6 +46,26 @@ public class FluxGateProperties {
 
     public void setProxy(Proxy proxy) {
         this.proxy = proxy;
+    }
+
+    public DemoBackends getDemoBackends() {
+        return demoBackends;
+    }
+
+    public void setDemoBackends(DemoBackends demoBackends) {
+        this.demoBackends = demoBackends;
+    }
+
+    public static class DemoBackends {
+        private boolean enabled = true;
+
+        public boolean isEnabled() {
+            return enabled;
+        }
+
+        public void setEnabled(boolean enabled) {
+            this.enabled = enabled;
+        }
     }
 
     public static class HealthCheck {
