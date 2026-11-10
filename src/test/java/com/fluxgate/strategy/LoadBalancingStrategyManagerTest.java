@@ -33,3 +33,4 @@ class LoadBalancingStrategyManagerTest {
         assertThrows(IllegalArgumentException.class, () -> manager.setActiveStrategy("NON_EXISTENT"));
     }
 }
+

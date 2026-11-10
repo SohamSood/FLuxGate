@@ -66,3 +66,4 @@ public class LoadBalancingStrategyManager implements LoadBalancingStrategy {
         log.info("[STRATEGY SWITCHED] Active strategy changed to: {}", key);
     }
 }
+

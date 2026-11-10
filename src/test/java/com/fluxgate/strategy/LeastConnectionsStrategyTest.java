@@ -59,3 +59,4 @@ class LeastConnectionsStrategyTest {
         assertEquals("http://localhost:8082", strategy.select(backends).orElseThrow().getUrl());
     }
 }
+
