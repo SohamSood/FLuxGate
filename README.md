@@ -17,7 +17,7 @@
 
 **FluxGate** is an enterprise-grade, high-performance reverse proxy and load balancing system built with **Spring Boot 3** and **Java 21**. It functions as a unified ingress gateway that dynamically routes, balances, and monitors traffic across distributed backend microservices.
 
-Featuring an **interactive Web Dashboard**, **dynamic algorithm switching** (Round Robin, Least Connections, Random), **automated health monitoring**, **embedded demo backend servers**, and **runtime backend registration**.
+Featuring an **interactive Web Dashboard**, **Traffic Guardian Adaptive Rate Limiter** (token-bucket per IP), **real-time Ingress Stream observability**, **dynamic algorithm switching** (Round Robin, Least Connections, Random), **automated health monitoring**, **embedded demo backend servers**, and **runtime backend registration**.
 
 ---
 
@@ -27,13 +27,15 @@ FluxGate is actively deployed on **Render**:
 
 | Interface / Endpoint | Method | Live Link | Description |
 | :--- | :---: | :--- | :--- |
-| **Interactive Dashboard** | `GET` | [`/`](https://fluxgate-bvjt.onrender.com/) or [`/dashboard`](https://fluxgate-bvjt.onrender.com/dashboard) | Real-time visual metrics, strategy switcher, backend manager & traffic generator |
-| **System Status** | `GET` | [`/fluxgate/status`](https://fluxgate-bvjt.onrender.com/fluxgate/status) | Real-time health metrics, active strategy, and backend telemetry (JSON) |
+| **Interactive Dashboard** | `GET` | [`/`](https://fluxgate-bvjt.onrender.com/) or [`/dashboard`](https://fluxgate-bvjt.onrender.com/dashboard) | Real-time visual metrics, rate limiter control, live traffic stream, backend manager & proxy simulator |
+| **System Status** | `GET` | [`/fluxgate/status`](https://fluxgate-bvjt.onrender.com/fluxgate/status) | Real-time health metrics, active strategy, rate limiter state & backend telemetry (JSON) |
 | **Self-Health Probe** | `GET` | [`/fluxgate/health`](https://fluxgate-bvjt.onrender.com/fluxgate/health) | Orchestrator health check (Render / K8s / ECS) |
+| **Rate Limiter Policy** | `GET`/`POST` | [`/fluxgate/rate-limit`](https://fluxgate-bvjt.onrender.com/fluxgate/rate-limit) | Inspect or dynamically reconfigure token-bucket capacity and refill rate |
+| **Traffic Stream & Metrics** | `GET`/`DELETE` | [`/fluxgate/metrics`](https://fluxgate-bvjt.onrender.com/fluxgate/metrics) | Real-time stream of recent transactions, status code breakdowns, and latency metrics |
 | **Strategy Control** | `GET`/`POST` | [`/fluxgate/strategy`](https://fluxgate-bvjt.onrender.com/fluxgate/strategy) | View or update active load balancing strategy dynamically |
 | **Manual Probe** | `POST` | `/fluxgate/health-check` | Triggers an immediate health probe across all registered backends |
 | **Dynamic Backends** | `POST`/`DELETE` | `/fluxgate/backends` | Add or remove backend instances at runtime |
-| **Reverse Proxy Demo** | `ANY` | [`/hello`](https://fluxgate-bvjt.onrender.com/hello) | Transparently balanced reverse proxy route returning upstream identity |
+| **Reverse Proxy Route** | `ANY` | [`/hello`](https://fluxgate-bvjt.onrender.com/hello) | Transparently balanced & rate-limited reverse proxy route returning upstream identity |
 
 ---
 

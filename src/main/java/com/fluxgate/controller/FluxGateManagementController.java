@@ -3,6 +3,8 @@ package com.fluxgate.controller;
 import com.fluxgate.model.BackendServer;
 import com.fluxgate.service.BackendRegistry;
 import com.fluxgate.service.HealthCheckService;
+import com.fluxgate.service.RateLimiterService;
+import com.fluxgate.service.TrafficMetricsService;
 import com.fluxgate.strategy.LoadBalancingStrategyManager;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -12,7 +14,7 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Exposes administrative and monitoring endpoints for FluxGate itself.
+ * Exposes administrative, rate-limiting, and telemetry monitoring endpoints for FluxGate.
  */
 @RestController
 @RequestMapping("/fluxgate")
@@ -21,13 +23,19 @@ public class FluxGateManagementController {
     private final BackendRegistry backendRegistry;
     private final HealthCheckService healthCheckService;
     private final LoadBalancingStrategyManager strategyManager;
+    private final RateLimiterService rateLimiterService;
+    private final TrafficMetricsService trafficMetricsService;
 
     public FluxGateManagementController(BackendRegistry backendRegistry,
                                         HealthCheckService healthCheckService,
-                                        LoadBalancingStrategyManager strategyManager) {
+                                        LoadBalancingStrategyManager strategyManager,
+                                        RateLimiterService rateLimiterService,
+                                        TrafficMetricsService trafficMetricsService) {
         this.backendRegistry = backendRegistry;
         this.healthCheckService = healthCheckService;
         this.strategyManager = strategyManager;
+        this.rateLimiterService = rateLimiterService;
+        this.trafficMetricsService = trafficMetricsService;
     }
 
     /**
@@ -44,6 +52,7 @@ public class FluxGateManagementController {
         response.put("healthyBackends", healthy.size());
         response.put("totalBackends", all.size());
         response.put("strategy", strategyManager.getActiveStrategyName());
+        response.put("rateLimiterEnabled", rateLimiterService.isEnabled());
 
         return ResponseEntity.ok(response);
     }
@@ -63,6 +72,19 @@ public class FluxGateManagementController {
         response.put("healthyCount", healthy.size());
         response.put("totalCount", all.size());
         response.put("backends", all);
+        response.put("rateLimiter", Map.of(
+                "enabled", rateLimiterService.isEnabled(),
+                "capacity", rateLimiterService.getCapacity(),
+                "refillRatePerMinute", rateLimiterService.getRefillRatePerMinute(),
+                "blockedRequests", rateLimiterService.getTotalBlockedRequests()
+        ));
+        response.put("metrics", Map.of(
+                "totalRequests", trafficMetricsService.getTotalRequests(),
+                "averageLatencyMs", trafficMetricsService.getAverageLatencyMs(),
+                "status2xx", trafficMetricsService.getTotal2xx(),
+                "status4xx", trafficMetricsService.getTotal4xx(),
+                "status5xx", trafficMetricsService.getTotal5xx()
+        ));
 
         return ResponseEntity.ok(response);
     }
@@ -92,6 +114,73 @@ public class FluxGateManagementController {
         } catch (IllegalArgumentException e) {
             return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
         }
+    }
+
+    /**
+     * Retrieves rate limiter configuration and telemetry.
+     */
+    @GetMapping("/rate-limit")
+    public ResponseEntity<Map<String, Object>> getRateLimit() {
+        return ResponseEntity.ok(Map.of(
+                "enabled", rateLimiterService.isEnabled(),
+                "capacity", rateLimiterService.getCapacity(),
+                "refillRatePerMinute", rateLimiterService.getRefillRatePerMinute(),
+                "totalAllowedRequests", rateLimiterService.getTotalAllowedRequests(),
+                "totalBlockedRequests", rateLimiterService.getTotalBlockedRequests(),
+                "trackedIpCount", rateLimiterService.getTrackedIpCount()
+        ));
+    }
+
+    /**
+     * Updates rate limiter configuration dynamically at runtime.
+     */
+    @PostMapping("/rate-limit")
+    public ResponseEntity<Map<String, Object>> updateRateLimit(
+            @RequestParam(required = false) Boolean enabled,
+            @RequestParam(required = false) Integer capacity,
+            @RequestParam(required = false) Integer refillRatePerMinute) {
+
+        if (enabled != null) {
+            rateLimiterService.setEnabled(enabled);
+        }
+        if (capacity != null) {
+            rateLimiterService.setCapacity(capacity);
+        }
+        if (refillRatePerMinute != null) {
+            rateLimiterService.setRefillRatePerMinute(refillRatePerMinute);
+        }
+
+        return ResponseEntity.ok(Map.of(
+                "message", "Rate limiter configuration updated successfully",
+                "enabled", rateLimiterService.isEnabled(),
+                "capacity", rateLimiterService.getCapacity(),
+                "refillRatePerMinute", rateLimiterService.getRefillRatePerMinute()
+        ));
+    }
+
+    /**
+     * Retrieves live ingress traffic metrics and recent request transactions.
+     */
+    @GetMapping("/metrics")
+    public ResponseEntity<Map<String, Object>> getMetrics() {
+        return ResponseEntity.ok(Map.of(
+                "totalRequests", trafficMetricsService.getTotalRequests(),
+                "averageLatencyMs", trafficMetricsService.getAverageLatencyMs(),
+                "status2xx", trafficMetricsService.getTotal2xx(),
+                "status4xx", trafficMetricsService.getTotal4xx(),
+                "status5xx", trafficMetricsService.getTotal5xx(),
+                "totalBlockedRequests", rateLimiterService.getTotalBlockedRequests(),
+                "recentRequests", trafficMetricsService.getRecentRequests()
+        ));
+    }
+
+    /**
+     * Resets traffic metrics buffer and counters.
+     */
+    @DeleteMapping("/metrics")
+    public ResponseEntity<Map<String, Object>> resetMetrics() {
+        trafficMetricsService.reset();
+        return ResponseEntity.ok(Map.of("message", "Traffic metrics and logs reset successfully"));
     }
 
     /**

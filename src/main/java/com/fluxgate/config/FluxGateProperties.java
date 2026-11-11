@@ -23,6 +23,7 @@ public class FluxGateProperties {
     private HealthCheck healthCheck = new HealthCheck();
     private Proxy proxy = new Proxy();
     private DemoBackends demoBackends = new DemoBackends();
+    private RateLimit rateLimit = new RateLimit();
 
     public List<String> getBackends() {
         return backends;
@@ -54,6 +55,14 @@ public class FluxGateProperties {
 
     public void setDemoBackends(DemoBackends demoBackends) {
         this.demoBackends = demoBackends;
+    }
+
+    public RateLimit getRateLimit() {
+        return rateLimit;
+    }
+
+    public void setRateLimit(RateLimit rateLimit) {
+        this.rateLimit = rateLimit;
     }
 
     public static class DemoBackends {
@@ -125,6 +134,36 @@ public class FluxGateProperties {
 
         public void setReadTimeoutMs(int readTimeoutMs) {
             this.readTimeoutMs = readTimeoutMs;
+        }
+    }
+
+    public static class RateLimit {
+        private boolean enabled = true;
+        private int capacity = 60;
+        private int refillRatePerMinute = 60;
+
+        public boolean isEnabled() {
+            return enabled;
+        }
+
+        public void setEnabled(boolean enabled) {
+            this.enabled = enabled;
+        }
+
+        public int getCapacity() {
+            return capacity;
+        }
+
+        public void setCapacity(int capacity) {
+            this.capacity = capacity;
+        }
+
+        public int getRefillRatePerMinute() {
+            return refillRatePerMinute;
+        }
+
+        public void setRefillRatePerMinute(int refillRatePerMinute) {
+            this.refillRatePerMinute = refillRatePerMinute;
         }
     }
 }

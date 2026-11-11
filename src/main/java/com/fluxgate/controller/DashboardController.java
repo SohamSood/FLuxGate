@@ -2,8 +2,9 @@ package com.fluxgate.controller;
 
 import com.fluxgate.model.BackendServer;
 import com.fluxgate.service.BackendRegistry;
+import com.fluxgate.service.RateLimiterService;
+import com.fluxgate.service.TrafficMetricsService;
 import com.fluxgate.strategy.LoadBalancingStrategyManager;
-import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Controller;
@@ -22,10 +23,17 @@ public class DashboardController {
 
     private final BackendRegistry backendRegistry;
     private final LoadBalancingStrategyManager strategyManager;
+    private final RateLimiterService rateLimiterService;
+    private final TrafficMetricsService trafficMetricsService;
 
-    public DashboardController(BackendRegistry backendRegistry, LoadBalancingStrategyManager strategyManager) {
+    public DashboardController(BackendRegistry backendRegistry,
+                               LoadBalancingStrategyManager strategyManager,
+                               RateLimiterService rateLimiterService,
+                               TrafficMetricsService trafficMetricsService) {
         this.backendRegistry = backendRegistry;
         this.strategyManager = strategyManager;
+        this.rateLimiterService = rateLimiterService;
+        this.trafficMetricsService = trafficMetricsService;
     }
 
     @GetMapping(value = {"/", "/dashboard"}, produces = MediaType.TEXT_HTML_VALUE)
@@ -42,17 +50,20 @@ public class DashboardController {
 
         Map<String, Object> response = new HashMap<>();
         response.put("service", "FluxGate Reverse Proxy & Load Balancer");
-        response.put("version", "1.1.0");
+        response.put("version", "1.2.0");
         response.put("status", healthy.isEmpty() ? "DEGRADED" : "HEALTHY");
         response.put("strategy", strategyManager.getActiveStrategyName());
         response.put("healthyBackends", healthy.size());
         response.put("totalBackends", all.size());
+        response.put("rateLimiterEnabled", rateLimiterService.isEnabled());
         response.put("dashboardUrl", "/dashboard");
         response.put("testEndpoint", "/hello");
         response.put("managementEndpoints", Map.of(
                 "health", "/fluxgate/health",
                 "status", "/fluxgate/status",
                 "strategy", "/fluxgate/strategy",
+                "rateLimit", "/fluxgate/rate-limit",
+                "metrics", "/fluxgate/metrics",
                 "backends", "/fluxgate/backends",
                 "healthCheck", "/fluxgate/health-check"
         ));
@@ -98,7 +109,7 @@ public class DashboardController {
       padding: 24px;
     }
     .container {
-      max-width: 1200px;
+      max-width: 1240px;
       margin: 0 auto;
       width: 100%;
     }
@@ -132,7 +143,7 @@ public class DashboardController {
       font-size: 24px;
       font-weight: 800;
       letter-spacing: -0.5px;
-      background: linear-gradient(90deg, #ffffff 0%, #cbd5e1 100%);
+      background: linear-gradient(to right, #ffffff, #94a3b8);
       -webkit-background-clip: text;
       -webkit-text-fill-color: transparent;
     }
@@ -148,8 +159,7 @@ public class DashboardController {
       border-radius: 9999px;
       font-size: 12px;
       font-weight: 600;
-      text-transform: uppercase;
-      letter-spacing: 0.5px;
+      font-family: 'JetBrains Mono', monospace;
     }
     .badge-online {
       background: rgba(16, 185, 129, 0.15);
@@ -167,32 +177,33 @@ public class DashboardController {
       border-radius: 50%;
       background: currentColor;
       box-shadow: 0 0 8px currentColor;
-      animation: pulse 2s infinite ease-in-out;
+      animation: pulse 2s infinite;
     }
     @keyframes pulse {
       0%, 100% { opacity: 1; transform: scale(1); }
-      50% { opacity: 0.4; transform: scale(0.8); }
+      50% { opacity: 0.4; transform: scale(0.85); }
     }
+    /* Stats row */
     .stats-grid {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
       gap: 16px;
       margin-bottom: 28px;
     }
     .stat-card {
       background: var(--card-bg);
       border: 1px solid var(--card-border);
-      border-radius: 16px;
-      padding: 20px;
+      border-radius: 14px;
+      padding: 18px 20px;
       display: flex;
       flex-direction: column;
-      gap: 8px;
+      gap: 6px;
     }
     .stat-label {
       font-size: 12px;
       color: var(--text-muted);
-      font-weight: 600;
       text-transform: uppercase;
+      font-weight: 600;
       letter-spacing: 0.5px;
     }
     .stat-value {
@@ -302,7 +313,7 @@ public class DashboardController {
       font-size: 13px;
       color: var(--text-main);
     }
-    /* Interactive tester */
+    /* Controls & Inputs */
     .tester-controls {
       display: flex;
       flex-wrap: wrap;
@@ -361,6 +372,50 @@ public class DashboardController {
       overflow-y: auto;
       white-space: pre-wrap;
     }
+    /* Traffic Stream Table */
+    .table-container {
+      overflow-x: auto;
+      margin-top: 12px;
+      border-radius: 10px;
+      border: 1px solid var(--card-border);
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+      text-align: left;
+    }
+    th {
+      background: #1e293b;
+      padding: 12px 14px;
+      color: var(--text-muted);
+      font-weight: 600;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    td {
+      padding: 10px 14px;
+      border-bottom: 1px solid #1e293b;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 12px;
+    }
+    tr:last-child td { border-bottom: none; }
+    tr:hover td { background: rgba(255, 255, 255, 0.02); }
+    .status-pill {
+      display: inline-block;
+      padding: 3px 8px;
+      border-radius: 6px;
+      font-weight: 600;
+      font-size: 11px;
+    }
+    .status-2xx { background: rgba(16, 185, 129, 0.2); color: #34d399; }
+    .status-4xx { background: rgba(245, 158, 11, 0.2); color: #fbbf24; }
+    .status-5xx { background: rgba(239, 68, 68, 0.2); color: #f87171; }
+    .method-pill {
+      font-weight: 700;
+      color: #818cf8;
+    }
     /* Distribution tracker */
     .distribution-bar {
       display: flex;
@@ -409,16 +464,16 @@ public class DashboardController {
         <div class="brand-icon">⚡</div>
         <div>
           <h1>FluxGate</h1>
-          <p>High-Performance Reverse Proxy & Adaptive Load Balancer</p>
+          <p>Enterprise Reverse Proxy, Adaptive Load Balancer & Traffic Guardian</p>
         </div>
       </div>
-      <div style="display: flex; align-items: center; gap: 12px;">
+      <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap;">
         <div id="clusterBadge" class="badge badge-online">
           <span class="pulse-dot"></span>
           <span id="clusterBadgeText">CONNECTING...</span>
         </div>
         <button class="btn btn-secondary" onclick="triggerHealthCheck()" title="Probe all backends now">
-          🔄 Probe Now
+          🔄 Probe Cluster
         </button>
       </div>
     </header>
@@ -436,14 +491,19 @@ public class DashboardController {
         <div class="stat-sub">Dynamic runtime switching</div>
       </div>
       <div class="stat-card">
-        <div class="stat-label">Total Proxied Requests</div>
-        <div class="stat-value" id="totalRequests" style="color: #34d399;">0</div>
-        <div class="stat-sub">Across all healthy backends</div>
+        <div class="stat-label">Rate Limiter (Per-IP)</div>
+        <div class="stat-value" id="rateLimitBadge" style="color: #34d399; font-size: 20px;">ACTIVE</div>
+        <div class="stat-sub" id="rateLimitSub">Token-bucket protection</div>
       </div>
       <div class="stat-card">
-        <div class="stat-label">Orchestrator Mode</div>
-        <div class="stat-value" style="color: #38bdf8; font-size: 22px;">STANDALONE</div>
-        <div class="stat-sub">Render Cloud Native</div>
+        <div class="stat-label">Total Proxied Requests</div>
+        <div class="stat-value" id="totalRequests" style="color: #38bdf8;">0</div>
+        <div class="stat-sub" id="blockedCountSub">0 throttled / blocked</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Average Latency</div>
+        <div class="stat-value" id="avgLatency" style="color: #fbbf24;">0.0 ms</div>
+        <div class="stat-sub">Ingress round-trip speed</div>
       </div>
     </div>
 
@@ -468,6 +528,35 @@ public class DashboardController {
       </div>
     </div>
 
+    <!-- Rate Limiter Control Card -->
+    <div class="card">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; flex-wrap: wrap; gap: 10px;">
+        <div class="section-title" style="margin-bottom: 0;">
+          <span>🛡️ Traffic Guardian & Adaptive Rate Limiter</span>
+        </div>
+        <div style="display: flex; gap: 8px;">
+          <button class="btn btn-secondary" id="toggleRateLimitBtn" onclick="toggleRateLimiter()">
+            🛡️ Toggle Protection
+          </button>
+        </div>
+      </div>
+      <p style="font-size: 13px; color: var(--text-muted); margin-bottom: 16px;">
+        Enforces token-bucket rate limits per client IP address. Rejects runaway scripts, scrapers, and DDoS bursts with standard <code>429 Too Many Requests</code>.
+      </p>
+      <div style="display: flex; gap: 12px; flex-wrap: wrap; align-items: center; background: #0f172a; padding: 14px; border-radius: 12px; border: 1px solid var(--card-border);">
+        <div style="display: flex; align-items: center; gap: 8px;">
+          <span style="font-size: 12px; color: var(--text-muted);">Burst Capacity:</span>
+          <input type="number" id="rlCapacity" style="width: 80px;" class="input-box" value="60" min="1">
+        </div>
+        <div style="display: flex; align-items: center; gap: 8px;">
+          <span style="font-size: 12px; color: var(--text-muted);">Refill Rate (tokens/min):</span>
+          <input type="number" id="rlRefill" style="width: 80px;" class="input-box" value="60" min="1">
+        </div>
+        <button class="btn" onclick="applyRateLimitSettings()">💾 Update Policy</button>
+        <span id="rateLimitMsg" style="font-size: 12px; color: #34d399; margin-left: auto;"></span>
+      </div>
+    </div>
+
     <!-- Active Backends Cluster -->
     <div class="card">
       <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
@@ -489,19 +578,60 @@ public class DashboardController {
       </div>
     </div>
 
+    <!-- Live Ingress Traffic Stream Table -->
+    <div class="card">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; flex-wrap: wrap; gap: 10px;">
+        <div class="section-title" style="margin-bottom: 0;">
+          <span>📊 Live Ingress Traffic Stream (Real-Time Observability)</span>
+        </div>
+        <button class="btn btn-secondary" style="font-size: 11px; padding: 6px 12px;" onclick="resetMetricsLog()">
+          🧹 Clear Logs
+        </button>
+      </div>
+      <p style="font-size: 13px; color: var(--text-muted); margin-bottom: 12px;">
+        Real-time audit log of proxied and throttled requests passing through FluxGate:
+      </p>
+
+      <div class="table-container">
+        <table>
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Client IP</th>
+              <th>Method</th>
+              <th>Path</th>
+              <th>Target Backend</th>
+              <th>Status</th>
+              <th>Latency</th>
+            </tr>
+          </thead>
+          <tbody id="trafficTableBody">
+            <tr>
+              <td colspan="7" style="text-align: center; color: var(--text-muted); padding: 18px;">
+                No traffic recorded yet. Send a request below to stream live transactions!
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
     <!-- Interactive Live Tester -->
     <div class="card">
       <div class="section-title">
         <span>🚀 Live Proxy Simulator & Traffic Generator</span>
       </div>
       <p style="font-size: 13px; color: var(--text-muted); margin-bottom: 16px;">
-        Send live requests directly through the reverse proxy to observe request routing in real time:
+        Send live requests directly through the reverse proxy to observe request routing and rate limiting in real time:
       </p>
 
       <div class="tester-controls">
         <input type="text" id="testPath" class="input-box" value="/hello" placeholder="/hello or /api/endpoint">
         <button class="btn" onclick="sendTestRequest()">⚡ Send 1 Request</button>
         <button class="btn btn-secondary" onclick="sendBatchRequests(10)">🚀 Send 10 Requests</button>
+        <button class="btn btn-secondary" style="background: rgba(239, 68, 68, 0.2); border-color: rgba(239, 68, 68, 0.4);" onclick="sendSpamRequests(25)">
+          💥 Spam 25 (Test Rate Limiter)
+        </button>
       </div>
 
       <!-- Batch Distribution Visualizer -->
@@ -524,6 +654,7 @@ public class DashboardController {
     const COLORS = ['#6366f1', '#06b6d4', '#10b981', '#f59e0b', '#ec4899', '#8b5cf6'];
     let currentBackends = [];
     let currentStrategy = 'ROUND_ROBIN';
+    let rateLimiterEnabled = true;
 
     async function fetchStatus() {
       try {
@@ -533,6 +664,17 @@ public class DashboardController {
         updateUI(data);
       } catch (err) {
         console.error('Fetch error:', err);
+      }
+    }
+
+    async function fetchMetrics() {
+      try {
+        const res = await fetch('/fluxgate/metrics');
+        if (!res.ok) return;
+        const data = await res.json();
+        updateMetricsUI(data);
+      } catch (err) {
+        console.error('Metrics error:', err);
       }
     }
 
@@ -556,8 +698,24 @@ public class DashboardController {
       document.getElementById('healthySub').textContent = data.healthyCount === data.totalCount ? 'Full cluster available' : 'Cluster partially degraded';
       document.getElementById('activeStrategy').textContent = currentStrategy;
 
-      const totalReq = currentBackends.reduce((acc, b) => acc + (b.totalRequests || 0), 0);
-      document.getElementById('totalRequests').textContent = totalReq;
+      // Rate limit status
+      const rl = data.rateLimiter || {};
+      rateLimiterEnabled = rl.enabled;
+      const rlBadge = document.getElementById('rateLimitBadge');
+      if (rl.enabled) {
+        rlBadge.textContent = 'ACTIVE (' + rl.capacity + '/min)';
+        rlBadge.style.color = '#34d399';
+      } else {
+        rlBadge.textContent = 'DISABLED';
+        rlBadge.style.color = '#f87171';
+      }
+      document.getElementById('blockedCountSub').textContent = (rl.blockedRequests || 0) + ' throttled / blocked';
+
+      const toggleBtn = document.getElementById('toggleRateLimitBtn');
+      if (toggleBtn) {
+        toggleBtn.textContent = rl.enabled ? '🛡️ Rate Limiter: ON' : '⚠️ Rate Limiter: OFF';
+        toggleBtn.style.color = rl.enabled ? '#34d399' : '#f87171';
+      }
 
       // Strategy buttons
       const buttons = document.querySelectorAll('.strategy-btn');
@@ -568,7 +726,7 @@ public class DashboardController {
 
       // Render backends
       const grid = document.getElementById('backendList');
-      grid.innerHTML = currentBackends.map((b, i) => {
+      grid.innerHTML = currentBackends.map((b) => {
         const isHealthy = b.healthy;
         return `
           <div class="backend-card" id="card-${encodeURIComponent(b.url)}">
@@ -601,6 +759,73 @@ public class DashboardController {
           </div>
         `;
       }).join('');
+    }
+
+    function updateMetricsUI(data) {
+      if (!data) return;
+      document.getElementById('totalRequests').textContent = data.totalRequests || 0;
+      document.getElementById('avgLatency').textContent = (data.averageLatencyMs || 0) + ' ms';
+
+      const tbody = document.getElementById('trafficTableBody');
+      const reqs = data.recentRequests || [];
+      if (reqs.length === 0) return;
+
+      tbody.innerHTML = reqs.slice(0, 15).map(r => {
+        let statusClass = 'status-2xx';
+        if (r.statusCode === 429 || (r.statusCode >= 400 && r.statusCode < 500)) statusClass = 'status-4xx';
+        else if (r.statusCode >= 500) statusClass = 'status-5xx';
+
+        return `
+          <tr>
+            <td style="color: var(--text-muted);">${r.timestamp}</td>
+            <td>${r.clientIp}</td>
+            <td class="method-pill">${r.method}</td>
+            <td style="color: #38bdf8;">${r.path}</td>
+            <td style="color: #a78bfa;">${r.targetBackend}</td>
+            <td><span class="status-pill ${statusClass}">${r.statusCode} ${r.rateLimited ? 'THROTTLED' : ''}</span></td>
+            <td>${r.latencyMs} ms</td>
+          </tr>
+        `;
+      }).join('');
+    }
+
+    async function toggleRateLimiter() {
+      try {
+        const nextState = !rateLimiterEnabled;
+        const res = await fetch('/fluxgate/rate-limit?enabled=' + nextState, { method: 'POST' });
+        if (res.ok) {
+          fetchStatus();
+        }
+      } catch (e) {
+        alert('Toggle error: ' + e.message);
+      }
+    }
+
+    async function applyRateLimitSettings() {
+      const cap = document.getElementById('rlCapacity').value;
+      const ref = document.getElementById('rlRefill').value;
+      const msg = document.getElementById('rateLimitMsg');
+
+      try {
+        const res = await fetch(`/fluxgate/rate-limit?capacity=${cap}&refillRatePerMinute=${ref}`, { method: 'POST' });
+        if (res.ok) {
+          msg.textContent = '✓ Updated!';
+          setTimeout(() => msg.textContent = '', 3000);
+          fetchStatus();
+        }
+      } catch (e) {
+        alert('Failed to update rate limit: ' + e.message);
+      }
+    }
+
+    async function resetMetricsLog() {
+      try {
+        await fetch('/fluxgate/metrics', { method: 'DELETE' });
+        fetchMetrics();
+        fetchStatus();
+      } catch (e) {
+        console.error(e);
+      }
     }
 
     async function setStrategy(name) {
@@ -674,6 +899,7 @@ public class DashboardController {
         const upstream = res.headers.get('X-Upstream-Backend') || 'Unknown';
         const proxyBy = res.headers.get('X-Proxy-By') || 'FluxGate';
         const proxyLatency = res.headers.get('X-Proxy-Latency') || (latency + 'ms');
+        const rateLimitRemaining = res.headers.get('X-RateLimit-Remaining');
 
         let textBody = await res.text();
         try {
@@ -685,10 +911,10 @@ public class DashboardController {
           `HTTP/1.1 ${res.status} ${res.statusText}\\n` +
           `X-Proxy-By: ${proxyBy}\\n` +
           `X-Upstream-Backend: ${upstream}\\n` +
+          `X-RateLimit-Remaining: ${rateLimitRemaining || 'N/A'}\\n` +
           `Round-Trip Latency: ${latency}ms (Proxy Latency: ${proxyLatency})\\n\\n` +
           textBody;
 
-        // Flash target backend card
         if (upstream) {
           const card = document.getElementById('card-' + encodeURIComponent(upstream));
           if (card) {
@@ -698,6 +924,7 @@ public class DashboardController {
         }
 
         fetchStatus();
+        fetchMetrics();
       } catch (err) {
         consoleBox.textContent += `[ERROR] ${err.message}`;
       }
@@ -726,9 +953,37 @@ public class DashboardController {
         consoleBox.scrollTop = consoleBox.scrollHeight;
       }
 
-      // Render distribution
       renderDistribution(hits, count);
       fetchStatus();
+      fetchMetrics();
+    }
+
+    async function sendSpamRequests(count) {
+      const pathInput = document.getElementById('testPath');
+      let path = pathInput.value.trim();
+      if (!path.startsWith('/')) path = '/' + path;
+
+      const consoleBox = document.getElementById('testOutput');
+      consoleBox.textContent = `[BURST RATE-LIMIT TEST] Firing ${count} rapid concurrent requests to test token-bucket limiter...\\n`;
+
+      const promises = [];
+      for (let i = 1; i <= count; i++) {
+        promises.push(
+          fetch(path, { headers: { 'Accept': 'application/json' } })
+            .then(res => {
+              const rem = res.headers.get('X-RateLimit-Remaining');
+              const tag = res.status === 429 ? '🚫 [429 THROTTLED]' : `✓ [${res.status} OK]`;
+              consoleBox.textContent += `${tag} Req #${i} | Remaining Tokens: ${rem || '0'}\\n`;
+              consoleBox.scrollTop = consoleBox.scrollHeight;
+            })
+            .catch(err => {
+              consoleBox.textContent += `Err #${i}: ${err.message}\\n`;
+            })
+        );
+      }
+      await Promise.all(promises);
+      fetchStatus();
+      fetchMetrics();
     }
 
     function renderDistribution(hits, total) {
@@ -762,9 +1017,14 @@ public class DashboardController {
       }
     }
 
-    // Auto-refresh cluster status every 3 seconds
-    setInterval(fetchStatus, 3000);
+    // Auto-refresh cluster status and metrics
+    setInterval(() => {
+      fetchStatus();
+      fetchMetrics();
+    }, 2500);
+
     fetchStatus();
+    fetchMetrics();
   </script>
 </body>
 </html>
