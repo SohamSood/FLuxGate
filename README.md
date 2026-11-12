@@ -17,7 +17,7 @@
 
 **FluxGate** is an enterprise-grade, high-performance reverse proxy and load balancing system built with **Spring Boot 3** and **Java 21**. It functions as a unified ingress gateway that dynamically routes, balances, and monitors traffic across distributed backend microservices.
 
-Featuring an **interactive Web Dashboard**, **Traffic Guardian Adaptive Rate Limiter** (token-bucket per IP), **real-time Ingress Stream observability**, **dynamic algorithm switching** (Round Robin, Least Connections, Random), **automated health monitoring**, **embedded demo backend servers**, and **runtime backend registration**.
+Featuring an **interactive Web Dashboard**, **High-Speed Edge Response Cache & Accelerator** (sub-millisecond hits, RFC 7234 semantics, and auto-invalidation), **Traffic Guardian Adaptive Rate Limiter** (token-bucket per IP), **real-time Ingress Stream observability**, **dynamic algorithm switching** (Round Robin, Least Connections, Random), **automated health monitoring**, **embedded demo backend servers**, and **runtime backend registration**.
 
 ---
 
@@ -27,15 +27,16 @@ FluxGate is actively deployed on **Render**:
 
 | Interface / Endpoint | Method | Live Link | Description |
 | :--- | :---: | :--- | :--- |
-| **Interactive Dashboard** | `GET` | [`/`](https://fluxgate-bvjt.onrender.com/) or [`/dashboard`](https://fluxgate-bvjt.onrender.com/dashboard) | Real-time visual metrics, rate limiter control, live traffic stream, backend manager & proxy simulator |
-| **System Status** | `GET` | [`/fluxgate/status`](https://fluxgate-bvjt.onrender.com/fluxgate/status) | Real-time health metrics, active strategy, rate limiter state & backend telemetry (JSON) |
+| **Interactive Dashboard** | `GET` | [`/`](https://fluxgate-bvjt.onrender.com/) or [`/dashboard`](https://fluxgate-bvjt.onrender.com/dashboard) | Real-time visual metrics, edge cache controls, rate limiter control, live traffic stream, backend manager & proxy simulator |
+| **System Status** | `GET` | [`/fluxgate/status`](https://fluxgate-bvjt.onrender.com/fluxgate/status) | Real-time health metrics, active strategy, cache stats, rate limiter state & backend telemetry (JSON) |
 | **Self-Health Probe** | `GET` | [`/fluxgate/health`](https://fluxgate-bvjt.onrender.com/fluxgate/health) | Orchestrator health check (Render / K8s / ECS) |
+| **Edge Cache API** | `GET`/`POST`/`DELETE` | [`/fluxgate/cache`](https://fluxgate-bvjt.onrender.com/fluxgate/cache) | Inspect hit ratio & cached routes, dynamically update TTL/max entries, or purge cache entries |
 | **Rate Limiter Policy** | `GET`/`POST` | [`/fluxgate/rate-limit`](https://fluxgate-bvjt.onrender.com/fluxgate/rate-limit) | Inspect or dynamically reconfigure token-bucket capacity and refill rate |
-| **Traffic Stream & Metrics** | `GET`/`DELETE` | [`/fluxgate/metrics`](https://fluxgate-bvjt.onrender.com/fluxgate/metrics) | Real-time stream of recent transactions, status code breakdowns, and latency metrics |
+| **Traffic Stream & Metrics** | `GET`/`DELETE` | [`/fluxgate/metrics`](https://fluxgate-bvjt.onrender.com/fluxgate/metrics) | Real-time stream of recent transactions, cache hit badges, status code breakdowns, and latency metrics |
 | **Strategy Control** | `GET`/`POST` | [`/fluxgate/strategy`](https://fluxgate-bvjt.onrender.com/fluxgate/strategy) | View or update active load balancing strategy dynamically |
 | **Manual Probe** | `POST` | `/fluxgate/health-check` | Triggers an immediate health probe across all registered backends |
 | **Dynamic Backends** | `POST`/`DELETE` | `/fluxgate/backends` | Add or remove backend instances at runtime |
-| **Reverse Proxy Route** | `ANY` | [`/hello`](https://fluxgate-bvjt.onrender.com/hello) | Transparently balanced & rate-limited reverse proxy route returning upstream identity |
+| **Reverse Proxy Route** | `ANY` | [`/hello`](https://fluxgate-bvjt.onrender.com/hello) | Transparently balanced, cached & rate-limited reverse proxy route returning upstream identity |
 
 ---
 
@@ -125,6 +126,24 @@ X-Proxy-Latency: 4ms
 for i in {1..10}; do curl -s https://fluxgate-bvjt.onrender.com/hello | grep "server"; done
 ```
 
+### Testing Edge Response Caching (Sub-Millisecond Hit)
+```bash
+# Request 1 (Initial fetch -> Cache Miss -> Stored in Edge Cache)
+curl -i https://fluxgate-bvjt.onrender.com/hello
+
+# Request 2 (Sub-millisecond Edge Hit -> 0ms latency)
+curl -i https://fluxgate-bvjt.onrender.com/hello
+```
+Headers on cache hit will indicate:
+```http
+HTTP/1.1 200 OK
+X-Cache: HIT
+Age: 2
+X-Cache-TTL: 28
+X-Proxy-Latency: 0ms (Edge Cache)
+X-Proxy-By: FluxGate
+```
+
 ---
 
 ## ⚙️ Configuration Properties
@@ -134,6 +153,9 @@ for i in {1..10}; do curl -s https://fluxgate-bvjt.onrender.com/hello | grep "se
 | `server.port` | `8080` | `PORT` | Listening port for FluxGate |
 | `fluxgate.backends` | `http://localhost:8081,...` | `FLUXGATE_BACKENDS` | Comma-separated list of target backend URLs |
 | `fluxgate.demo-backends.enabled` | `true` | `FLUXGATE_DEMO_BACKENDS_ENABLED` | Auto-start embedded workers for single-container cloud hosting |
+| `fluxgate.cache.enabled` | `true` | `FLUXGATE_CACHE_ENABLED` | Enable in-memory RFC 7234 edge response caching |
+| `fluxgate.cache.default-ttl-seconds` | `30` | `FLUXGATE_CACHE_TTL` | Default time-to-live for cached GET responses |
+| `fluxgate.cache.max-entries` | `500` | `FLUXGATE_CACHE_MAX_ENTRIES` | Maximum concurrent cached responses before LRU eviction |
 | `fluxgate.health-check.interval-ms` | `10000` | `FLUXGATE_HEALTH_INTERVAL` | Health check probe frequency (ms) |
 | `fluxgate.health-check.timeout-ms` | `2000` | `FLUXGATE_HEALTH_TIMEOUT` | Timeout per probe (ms) |
 | `fluxgate.proxy.connect-timeout-ms` | `3000` | - | Timeout when connecting to upstream backends |

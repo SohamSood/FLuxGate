@@ -5,7 +5,7 @@ import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 
 /**
- * Immutable log record capturing an individual proxied or rate-limited ingress transaction.
+ * Immutable log record capturing an individual proxied, cached, or rate-limited ingress transaction.
  */
 public class RequestLogEntry {
 
@@ -21,9 +21,17 @@ public class RequestLogEntry {
     private final int statusCode;
     private final long latencyMs;
     private final boolean rateLimited;
+    private final String cacheStatus; // "HIT", "MISS", "BYPASS", "THROTTLED"
 
     public RequestLogEntry(long id, String clientIp, String method, String path,
                            String targetBackend, int statusCode, long latencyMs, boolean rateLimited) {
+        this(id, clientIp, method, path, targetBackend, statusCode, latencyMs, rateLimited,
+                rateLimited ? "THROTTLED" : "BYPASS");
+    }
+
+    public RequestLogEntry(long id, String clientIp, String method, String path,
+                           String targetBackend, int statusCode, long latencyMs, boolean rateLimited,
+                           String cacheStatus) {
         this.id = id;
         this.timestamp = TIME_FORMAT.format(Instant.now());
         this.clientIp = clientIp != null ? clientIp : "unknown";
@@ -33,6 +41,7 @@ public class RequestLogEntry {
         this.statusCode = statusCode;
         this.latencyMs = latencyMs;
         this.rateLimited = rateLimited;
+        this.cacheStatus = cacheStatus != null ? cacheStatus : (rateLimited ? "THROTTLED" : "BYPASS");
     }
 
     public long getId() {
@@ -69,5 +78,9 @@ public class RequestLogEntry {
 
     public boolean isRateLimited() {
         return rateLimited;
+    }
+
+    public String getCacheStatus() {
+        return cacheStatus;
     }
 }

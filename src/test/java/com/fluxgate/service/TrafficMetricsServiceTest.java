@@ -48,3 +48,4 @@ class TrafficMetricsServiceTest {
         assertTrue(metricsService.getRecentRequests().isEmpty());
     }
 }
+

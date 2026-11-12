@@ -1,12 +1,14 @@
 package com.fluxgate.controller;
 
 import com.fluxgate.model.BackendServer;
+import com.fluxgate.model.CachedResponse;
 import com.fluxgate.model.ProxyResponse;
 import com.fluxgate.model.RateLimitResult;
 import com.fluxgate.service.BackendRegistry;
 import com.fluxgate.service.NoHealthyBackendException;
 import com.fluxgate.service.ProxyService;
 import com.fluxgate.service.RateLimiterService;
+import com.fluxgate.service.ResponseCacheService;
 import com.fluxgate.service.TrafficMetricsService;
 import com.fluxgate.strategy.LoadBalancingStrategy;
 import jakarta.servlet.http.HttpServletRequest;
@@ -19,10 +21,11 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.nio.charset.StandardCharsets;
+import java.util.Optional;
 
 /**
- * Catch-all controller intercepting client requests, enforcing rate limits,
- * selecting a healthy backend, and forwarding the request.
+ * Catch-all reverse proxy controller: enforces rate limits, manages edge response caching,
+ * routes traffic via load balancing strategies, and captures telemetry.
  */
 @RestController
 public class ReverseProxyController {
@@ -31,17 +34,20 @@ public class ReverseProxyController {
     private final LoadBalancingStrategy loadBalancingStrategy;
     private final ProxyService proxyService;
     private final RateLimiterService rateLimiterService;
+    private final ResponseCacheService responseCacheService;
     private final TrafficMetricsService trafficMetricsService;
 
     public ReverseProxyController(BackendRegistry backendRegistry,
                                   LoadBalancingStrategy loadBalancingStrategy,
                                   ProxyService proxyService,
                                   RateLimiterService rateLimiterService,
+                                  ResponseCacheService responseCacheService,
                                   TrafficMetricsService trafficMetricsService) {
         this.backendRegistry = backendRegistry;
         this.loadBalancingStrategy = loadBalancingStrategy;
         this.proxyService = proxyService;
         this.rateLimiterService = rateLimiterService;
+        this.responseCacheService = responseCacheService;
         this.trafficMetricsService = trafficMetricsService;
     }
 
@@ -68,7 +74,8 @@ public class ReverseProxyController {
                     "RATE_LIMITED",
                     HttpStatus.TOO_MANY_REQUESTS.value(),
                     0,
-                    true
+                    true,
+                    "THROTTLED"
             );
 
             HttpHeaders headers = new HttpHeaders();
@@ -89,24 +96,89 @@ public class ReverseProxyController {
                     .body(errorJson.getBytes(StandardCharsets.UTF_8));
         }
 
+        String method = request.getMethod();
+        String queryString = request.getQueryString();
+        String cacheKey = method + ":" + uri + (queryString != null && !queryString.isBlank() ? "?" + queryString : "");
+        boolean isCacheableMethod = "GET".equalsIgnoreCase(method) || "HEAD".equalsIgnoreCase(method);
+        boolean cacheBypassRequested = isBypassCacheRequested(request);
+
+        // 1. Edge Cache Lookup for idempotent read requests
+        if (isCacheableMethod && !cacheBypassRequested && responseCacheService.isEnabled()) {
+            Optional<CachedResponse> cachedOpt = responseCacheService.get(cacheKey);
+            if (cachedOpt.isPresent()) {
+                CachedResponse cached = cachedOpt.get();
+                trafficMetricsService.record(
+                        clientIp,
+                        method,
+                        uri,
+                        cached.getOriginBackend() + " (Edge Cache)",
+                        cached.getStatusCode(),
+                        0,
+                        false,
+                        "HIT"
+                );
+
+                HttpHeaders responseHeaders = new HttpHeaders();
+                responseHeaders.addAll(cached.getHeaders());
+                responseHeaders.set("X-Cache", "HIT");
+                responseHeaders.set("Age", String.valueOf(cached.getAgeSeconds()));
+                responseHeaders.set("X-Cache-TTL", String.valueOf(cached.getRemainingTtlSeconds()));
+                responseHeaders.set("X-Proxy-Latency", "0ms (Edge Cache)");
+                responseHeaders.set("X-Upstream-Backend", cached.getOriginBackend());
+                responseHeaders.set("X-RateLimit-Limit", String.valueOf(rateLimitResult.getCapacity()));
+                responseHeaders.set("X-RateLimit-Remaining", String.valueOf(rateLimitResult.getRemainingTokens()));
+
+                return ResponseEntity
+                        .status(cached.getStatusCode())
+                        .headers(responseHeaders)
+                        .body(cached.getBody());
+            }
+        }
+
+        // 2. Cache Miss or Mutating Request: Route through upstream backend
         BackendServer backend = loadBalancingStrategy.select(backendRegistry.getAllBackends())
                 .orElseThrow(() -> new NoHealthyBackendException(
                         "No healthy backend instances available to handle the request: " + request.getRequestURI()));
 
         ProxyResponse proxyResponse = proxyService.forward(request, body, backend);
 
+        // 3. Determine cache status & handle store or invalidation
+        String cacheStatus;
+        if (isCacheableMethod) {
+            if (cacheBypassRequested || !responseCacheService.isEnabled()) {
+                cacheStatus = "BYPASS";
+            } else {
+                cacheStatus = "MISS";
+                if (proxyResponse.getStatusCode() >= 200 && proxyResponse.getStatusCode() < 300) {
+                    responseCacheService.put(
+                            cacheKey,
+                            proxyResponse.getStatusCode(),
+                            proxyResponse.getHeaders(),
+                            proxyResponse.getBody(),
+                            backend.getUrl()
+                    );
+                }
+            }
+        } else {
+            // State-mutating request (POST, PUT, DELETE, PATCH): Invalidate affected cache keys
+            responseCacheService.invalidatePath(uri);
+            cacheStatus = "BYPASS";
+        }
+
         trafficMetricsService.record(
                 clientIp,
-                request.getMethod(),
+                method,
                 uri,
                 backend.getUrl(),
                 proxyResponse.getStatusCode(),
                 proxyResponse.getLatencyMs(),
-                false
+                false,
+                cacheStatus
         );
 
         HttpHeaders responseHeaders = new HttpHeaders();
         responseHeaders.addAll(proxyResponse.getHeaders());
+        responseHeaders.set("X-Cache", cacheStatus);
         responseHeaders.set("X-RateLimit-Limit", String.valueOf(rateLimitResult.getCapacity()));
         responseHeaders.set("X-RateLimit-Remaining", String.valueOf(rateLimitResult.getRemainingTokens()));
 
@@ -114,6 +186,13 @@ public class ReverseProxyController {
                 .status(proxyResponse.getStatusCode())
                 .headers(responseHeaders)
                 .body(proxyResponse.getBody());
+    }
+
+    private boolean isBypassCacheRequested(HttpServletRequest request) {
+        String cacheControl = request.getHeader("Cache-Control");
+        String pragma = request.getHeader("Pragma");
+        return (cacheControl != null && (cacheControl.contains("no-cache") || cacheControl.contains("no-store")))
+                || "no-cache".equalsIgnoreCase(pragma);
     }
 
     private String extractClientIp(HttpServletRequest request) {

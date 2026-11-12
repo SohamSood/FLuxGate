@@ -4,6 +4,7 @@ import com.fluxgate.model.BackendServer;
 import com.fluxgate.service.BackendRegistry;
 import com.fluxgate.service.HealthCheckService;
 import com.fluxgate.service.RateLimiterService;
+import com.fluxgate.service.ResponseCacheService;
 import com.fluxgate.service.TrafficMetricsService;
 import com.fluxgate.strategy.LoadBalancingStrategyManager;
 import org.springframework.http.ResponseEntity;
@@ -14,7 +15,7 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Exposes administrative, rate-limiting, and telemetry monitoring endpoints for FluxGate.
+ * Exposes administrative, rate-limiting, edge cache, and telemetry monitoring endpoints for FluxGate.
  */
 @RestController
 @RequestMapping("/fluxgate")
@@ -24,17 +25,20 @@ public class FluxGateManagementController {
     private final HealthCheckService healthCheckService;
     private final LoadBalancingStrategyManager strategyManager;
     private final RateLimiterService rateLimiterService;
+    private final ResponseCacheService responseCacheService;
     private final TrafficMetricsService trafficMetricsService;
 
     public FluxGateManagementController(BackendRegistry backendRegistry,
                                         HealthCheckService healthCheckService,
                                         LoadBalancingStrategyManager strategyManager,
                                         RateLimiterService rateLimiterService,
+                                        ResponseCacheService responseCacheService,
                                         TrafficMetricsService trafficMetricsService) {
         this.backendRegistry = backendRegistry;
         this.healthCheckService = healthCheckService;
         this.strategyManager = strategyManager;
         this.rateLimiterService = rateLimiterService;
+        this.responseCacheService = responseCacheService;
         this.trafficMetricsService = trafficMetricsService;
     }
 
@@ -53,12 +57,13 @@ public class FluxGateManagementController {
         response.put("totalBackends", all.size());
         response.put("strategy", strategyManager.getActiveStrategyName());
         response.put("rateLimiterEnabled", rateLimiterService.isEnabled());
+        response.put("edgeCacheEnabled", responseCacheService.isEnabled());
 
         return ResponseEntity.ok(response);
     }
 
     /**
-     * Returns full status information for all registered backend instances.
+     * Returns full status information for all registered backend instances, rate limiter, and edge cache.
      */
     @GetMapping("/status")
     public ResponseEntity<Map<String, Object>> getStatus() {
@@ -78,15 +83,81 @@ public class FluxGateManagementController {
                 "refillRatePerMinute", rateLimiterService.getRefillRatePerMinute(),
                 "blockedRequests", rateLimiterService.getTotalBlockedRequests()
         ));
+        response.put("cache", responseCacheService.getStats());
         response.put("metrics", Map.of(
                 "totalRequests", trafficMetricsService.getTotalRequests(),
                 "averageLatencyMs", trafficMetricsService.getAverageLatencyMs(),
                 "status2xx", trafficMetricsService.getTotal2xx(),
                 "status4xx", trafficMetricsService.getTotal4xx(),
-                "status5xx", trafficMetricsService.getTotal5xx()
+                "status5xx", trafficMetricsService.getTotal5xx(),
+                "cacheHits", trafficMetricsService.getTotalCacheHits()
         ));
 
         return ResponseEntity.ok(response);
+    }
+
+    /**
+     * Returns edge response cache statistics and telemetry.
+     */
+    @GetMapping("/cache")
+    public ResponseEntity<Map<String, Object>> getCacheStats() {
+        return ResponseEntity.ok(responseCacheService.getStats());
+    }
+
+    /**
+     * Updates edge response cache configuration dynamically.
+     */
+    @PostMapping("/cache")
+    public ResponseEntity<Map<String, Object>> updateCacheConfig(
+            @RequestParam(required = false) Boolean enabled,
+            @RequestParam(required = false) Integer defaultTtlSeconds,
+            @RequestParam(required = false) Integer maxEntries) {
+
+        if (enabled != null) {
+            responseCacheService.setEnabled(enabled);
+        }
+        if (defaultTtlSeconds != null) {
+            responseCacheService.setDefaultTtlSeconds(defaultTtlSeconds);
+        }
+        if (maxEntries != null) {
+            responseCacheService.setMaxEntries(maxEntries);
+        }
+
+        Map<String, Object> res = new HashMap<>(responseCacheService.getStats());
+        res.put("message", "Edge cache configuration updated successfully");
+        return ResponseEntity.ok(res);
+    }
+
+    /**
+     * Purges all or targeted entries from edge response cache.
+     */
+    @DeleteMapping("/cache")
+    public ResponseEntity<Map<String, Object>> purgeCache(
+            @RequestParam(required = false) String key,
+            @RequestParam(required = false) String path) {
+
+        if (key != null && !key.isBlank()) {
+            boolean removed = responseCacheService.invalidate(key);
+            return ResponseEntity.ok(Map.of(
+                    "message", removed ? "Key invalidated from cache" : "Key not found in cache",
+                    "key", key,
+                    "removed", removed
+            ));
+        } else if (path != null && !path.isBlank()) {
+            int removed = responseCacheService.invalidatePath(path);
+            return ResponseEntity.ok(Map.of(
+                    "message", "Path invalidated from cache",
+                    "path", path,
+                    "removedCount", removed
+            ));
+        } else {
+            int before = responseCacheService.getEntriesCount();
+            responseCacheService.clear();
+            return ResponseEntity.ok(Map.of(
+                    "message", "Edge cache purged successfully",
+                    "purgedEntries", before
+            ));
+        }
     }
 
     /**
@@ -170,6 +241,7 @@ public class FluxGateManagementController {
                 "status4xx", trafficMetricsService.getTotal4xx(),
                 "status5xx", trafficMetricsService.getTotal5xx(),
                 "totalBlockedRequests", rateLimiterService.getTotalBlockedRequests(),
+                "cacheHits", trafficMetricsService.getTotalCacheHits(),
                 "recentRequests", trafficMetricsService.getRecentRequests()
         ));
     }

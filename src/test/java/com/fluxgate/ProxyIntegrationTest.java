@@ -40,6 +40,9 @@ class ProxyIntegrationTest {
     @Autowired
     private RoundRobinStrategy roundRobinStrategy;
 
+    @Autowired
+    private com.fluxgate.service.ResponseCacheService responseCacheService;
+
     private static HttpServer server1;
     private static HttpServer server2;
     private static HttpServer server3;
@@ -71,6 +74,10 @@ class ProxyIntegrationTest {
         backendRegistry.registerBackend(url2);
         backendRegistry.registerBackend(url3);
         roundRobinStrategy.reset();
+        if (responseCacheService != null) {
+            responseCacheService.clear();
+            responseCacheService.setEnabled(false);
+        }
 
         server1HitCount.set(0);
         server2HitCount.set(0);
@@ -210,5 +217,31 @@ class ProxyIntegrationTest {
         assertEquals(HttpStatus.OK, statusResp.getStatusCode());
         assertEquals("ROUND_ROBIN", statusResp.getBody().get("strategy"));
         assertEquals(3, (int) statusResp.getBody().get("totalCount"));
+    }
+
+    @Test
+    @DisplayName("Should cache idempotent GET responses and serve sub-millisecond cache hits")
+    void testEdgeCachingIntegration() {
+        responseCacheService.setEnabled(true);
+        try {
+            // First request: Cache Miss
+            ResponseEntity<String> res1 = restTemplate.getForEntity(getBaseUrl() + "/api/echo?cacheTest=1", String.class);
+            assertEquals(HttpStatus.OK, res1.getStatusCode());
+            assertEquals("MISS", res1.getHeaders().getFirst("X-Cache"));
+
+            // Second request: Cache Hit
+            ResponseEntity<String> res2 = restTemplate.getForEntity(getBaseUrl() + "/api/echo?cacheTest=1", String.class);
+            assertEquals(HttpStatus.OK, res2.getStatusCode());
+            assertEquals("HIT", res2.getHeaders().getFirst("X-Cache"));
+            assertEquals("0ms (Edge Cache)", res2.getHeaders().getFirst("X-Proxy-Latency"));
+
+            // Verify cache stats endpoint
+            ResponseEntity<Map> cacheResp = restTemplate.getForEntity(getBaseUrl() + "/fluxgate/cache", Map.class);
+            assertEquals(HttpStatus.OK, cacheResp.getStatusCode());
+            assertEquals(true, cacheResp.getBody().get("enabled"));
+            assertEquals(1, (int) cacheResp.getBody().get("hitCount"));
+        } finally {
+            responseCacheService.setEnabled(false);
+        }
     }
 }

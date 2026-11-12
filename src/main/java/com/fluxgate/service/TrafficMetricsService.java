@@ -10,7 +10,7 @@ import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * High-performance telemetry buffer and aggregated traffic metrics engine.
- * Records live transactions and provides real-time observability for FluxGate.
+ * Records live transactions, edge cache telemetry, and provides real-time observability for FluxGate.
  */
 @Service
 public class TrafficMetricsService {
@@ -25,15 +25,30 @@ public class TrafficMetricsService {
     private final AtomicLong total4xx = new AtomicLong(0);
     private final AtomicLong total5xx = new AtomicLong(0);
     private final AtomicLong totalLatencyMs = new AtomicLong(0);
+    private final AtomicLong totalCacheHits = new AtomicLong(0);
 
     /**
-     * Records a completed transaction or throttled request.
+     * Records a completed transaction or throttled request with default cache status.
      */
     public void record(String clientIp, String method, String path,
                        String targetBackend, int statusCode, long latencyMs, boolean rateLimited) {
+        String defaultStatus = rateLimited ? "THROTTLED" : "BYPASS";
+        record(clientIp, method, path, targetBackend, statusCode, latencyMs, rateLimited, defaultStatus);
+    }
+
+    /**
+     * Records a completed transaction, cache hit/miss, or throttled request.
+     */
+    public void record(String clientIp, String method, String path,
+                       String targetBackend, int statusCode, long latencyMs, boolean rateLimited,
+                       String cacheStatus) {
 
         totalRequests.incrementAndGet();
         totalLatencyMs.addAndGet(Math.max(0, latencyMs));
+
+        if ("HIT".equalsIgnoreCase(cacheStatus)) {
+            totalCacheHits.incrementAndGet();
+        }
 
         if (statusCode >= 200 && statusCode < 300) {
             total2xx.incrementAndGet();
@@ -51,7 +66,8 @@ public class TrafficMetricsService {
                 targetBackend,
                 statusCode,
                 latencyMs,
-                rateLimited
+                rateLimited,
+                cacheStatus
         );
 
         recentRequests.addFirst(entry);
@@ -80,6 +96,10 @@ public class TrafficMetricsService {
         return total5xx.get();
     }
 
+    public long getTotalCacheHits() {
+        return totalCacheHits.get();
+    }
+
     public double getAverageLatencyMs() {
         long count = totalRequests.get();
         if (count == 0) {
@@ -95,5 +115,6 @@ public class TrafficMetricsService {
         total4xx.set(0);
         total5xx.set(0);
         totalLatencyMs.set(0);
+        totalCacheHits.set(0);
     }
 }

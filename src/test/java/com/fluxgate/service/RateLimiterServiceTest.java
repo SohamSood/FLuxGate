@@ -75,3 +75,4 @@ class RateLimiterServiceTest {
         assertEquals(0, rateLimiterService.getTotalBlockedRequests());
     }
 }
+

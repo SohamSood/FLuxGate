@@ -24,6 +24,7 @@ public class FluxGateProperties {
     private Proxy proxy = new Proxy();
     private DemoBackends demoBackends = new DemoBackends();
     private RateLimit rateLimit = new RateLimit();
+    private Cache cache = new Cache();
 
     public List<String> getBackends() {
         return backends;
@@ -63,6 +64,14 @@ public class FluxGateProperties {
 
     public void setRateLimit(RateLimit rateLimit) {
         this.rateLimit = rateLimit;
+    }
+
+    public Cache getCache() {
+        return cache;
+    }
+
+    public void setCache(Cache cache) {
+        this.cache = cache;
     }
 
     public static class DemoBackends {
@@ -164,6 +173,36 @@ public class FluxGateProperties {
 
         public void setRefillRatePerMinute(int refillRatePerMinute) {
             this.refillRatePerMinute = refillRatePerMinute;
+        }
+    }
+
+    public static class Cache {
+        private boolean enabled = true;
+        private int defaultTtlSeconds = 30;
+        private int maxEntries = 500;
+
+        public boolean isEnabled() {
+            return enabled;
+        }
+
+        public void setEnabled(boolean enabled) {
+            this.enabled = enabled;
+        }
+
+        public int getDefaultTtlSeconds() {
+            return defaultTtlSeconds;
+        }
+
+        public void setDefaultTtlSeconds(int defaultTtlSeconds) {
+            this.defaultTtlSeconds = defaultTtlSeconds;
+        }
+
+        public int getMaxEntries() {
+            return maxEntries;
+        }
+
+        public void setMaxEntries(int maxEntries) {
+            this.maxEntries = maxEntries;
         }
     }
 }
