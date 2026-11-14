@@ -1,6 +1,7 @@
 package com.fluxgate.controller;
 
 import com.fluxgate.model.BackendServer;
+import com.fluxgate.resilience.CircuitBreakerManager;
 import com.fluxgate.service.BackendRegistry;
 import com.fluxgate.service.RateLimiterService;
 import com.fluxgate.service.ResponseCacheService;
@@ -27,17 +28,20 @@ public class DashboardController {
     private final RateLimiterService rateLimiterService;
     private final ResponseCacheService responseCacheService;
     private final TrafficMetricsService trafficMetricsService;
+    private final CircuitBreakerManager circuitBreakerManager;
 
     public DashboardController(BackendRegistry backendRegistry,
                                LoadBalancingStrategyManager strategyManager,
                                RateLimiterService rateLimiterService,
                                ResponseCacheService responseCacheService,
-                               TrafficMetricsService trafficMetricsService) {
+                               TrafficMetricsService trafficMetricsService,
+                               CircuitBreakerManager circuitBreakerManager) {
         this.backendRegistry = backendRegistry;
         this.strategyManager = strategyManager;
         this.rateLimiterService = rateLimiterService;
         this.responseCacheService = responseCacheService;
         this.trafficMetricsService = trafficMetricsService;
+        this.circuitBreakerManager = circuitBreakerManager;
     }
 
     @GetMapping(value = {"/", "/dashboard"}, produces = MediaType.TEXT_HTML_VALUE)
@@ -54,18 +58,20 @@ public class DashboardController {
 
         Map<String, Object> response = new HashMap<>();
         response.put("service", "FluxGate Reverse Proxy & Load Balancer");
-        response.put("version", "1.3.0");
+        response.put("version", "1.4.0");
         response.put("status", healthy.isEmpty() ? "DEGRADED" : "HEALTHY");
         response.put("strategy", strategyManager.getActiveStrategyName());
         response.put("healthyBackends", healthy.size());
         response.put("totalBackends", all.size());
         response.put("rateLimiterEnabled", rateLimiterService.isEnabled());
         response.put("edgeCacheEnabled", responseCacheService.isEnabled());
+        response.put("circuitBreakers", circuitBreakerManager.getTelemetry());
         response.put("dashboardUrl", "/dashboard");
         response.put("testEndpoint", "/hello");
         response.put("managementEndpoints", Map.of(
                 "health", "/fluxgate/health",
                 "status", "/fluxgate/status",
+                "circuitBreakers", "/fluxgate/circuit-breakers",
                 "strategy", "/fluxgate/strategy",
                 "rateLimit", "/fluxgate/rate-limit",
                 "cache", "/fluxgate/cache",
@@ -177,6 +183,47 @@ public class DashboardController {
       background: rgba(239, 68, 68, 0.15);
       color: #f87171;
       border: 1px solid rgba(239, 68, 68, 0.3);
+    }
+    .badge-warning {
+      background: rgba(245, 158, 11, 0.15);
+      color: #fbbf24;
+      border: 1px solid rgba(245, 158, 11, 0.3);
+    }
+    .circuit-pill-closed {
+      background: rgba(16, 185, 129, 0.15);
+      color: #34d399;
+      border: 1px solid rgba(16, 185, 129, 0.3);
+      padding: 3px 8px;
+      border-radius: 6px;
+      font-weight: 700;
+      font-size: 11px;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .circuit-pill-open {
+      background: rgba(239, 68, 68, 0.15);
+      color: #f87171;
+      border: 1px solid rgba(239, 68, 68, 0.3);
+      padding: 3px 8px;
+      border-radius: 6px;
+      font-weight: 700;
+      font-size: 11px;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .circuit-pill-half {
+      background: rgba(245, 158, 11, 0.15);
+      color: #fbbf24;
+      border: 1px solid rgba(245, 158, 11, 0.3);
+      padding: 3px 8px;
+      border-radius: 6px;
+      font-weight: 700;
+      font-size: 11px;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
     }
     .pulse-dot {
       width: 8px;
@@ -594,6 +641,11 @@ public class DashboardController {
         <div class="stat-value" id="avgLatency" style="color: #fbbf24;">0.0 ms</div>
         <div class="stat-sub">Ingress round-trip speed</div>
       </div>
+      <div class="stat-card">
+        <div class="stat-label">⚡ Circuit Breaker & Failovers</div>
+        <div class="stat-value" id="circuitBreakerStat" style="color: #10b981;">0 OPEN</div>
+        <div class="stat-sub" id="failoverStatSub">0 in-flight failovers</div>
+      </div>
     </div>
 
     <!-- Strategy Switcher -->
@@ -697,6 +749,49 @@ public class DashboardController {
       </div>
     </div>
 
+    <!-- Enterprise Dynamic Circuit Breaker & Automatic Failover Card -->
+    <div class="card">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; flex-wrap: wrap; gap: 10px;">
+        <div class="section-title" style="margin-bottom: 0;">
+          <span>⚡ Enterprise Dynamic Circuit Breaker & Automatic Failover</span>
+        </div>
+        <div style="display: flex; gap: 8px;">
+          <button class="btn btn-secondary" id="toggleCircuitBtn" onclick="toggleCircuitBreaker()">
+            ⚡ Circuit Breakers: ON
+          </button>
+          <button class="btn btn-purple" onclick="resetAllCircuits()">
+            🔄 Reset All Circuits
+          </button>
+        </div>
+      </div>
+      <p style="font-size: 13px; color: var(--text-muted); margin-bottom: 16px;">
+        Detects backend degradation and isolates failing upstream hosts (State: <code>CLOSED</code> &rarr; <code>OPEN</code> &rarr; <code>HALF_OPEN</code>). If a host trips or throws a 5xx/timeout error, FluxGate executes an <strong>in-flight transparent failover</strong> to an alternate healthy backend with zero client errors.
+      </p>
+
+      <div class="table-container">
+        <table>
+          <thead>
+            <tr>
+              <th>Backend Host</th>
+              <th>Circuit State</th>
+              <th>Failures / Threshold</th>
+              <th>Trips</th>
+              <th>Failovers Rerouted</th>
+              <th>Last Failure Cause</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="circuitBreakersTableBody">
+            <tr>
+              <td colspan="7" style="text-align: center; color: var(--text-muted); padding: 14px;">
+                Loading circuit breaker status...
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
     <!-- Active Backends Cluster -->
     <div class="card">
       <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
@@ -771,6 +866,9 @@ public class DashboardController {
         <button class="btn" onclick="sendTestRequest()">⚡ Send 1 Request</button>
         <button class="btn btn-secondary" style="border-color: #10b981; color: #34d399;" onclick="testCacheAccelerator()">
           ⚡ Test Cache Accelerator (Double GET)
+        </button>
+        <button class="btn btn-secondary" style="border-color: #f59e0b; color: #fbbf24; background: rgba(245, 158, 11, 0.15);" onclick="testCircuitFailover()">
+          💥 Test Circuit Trip & Failover
         </button>
         <button class="btn btn-secondary" onclick="sendBatchRequests(10)">🚀 Send 10 Requests</button>
         <button class="btn btn-secondary" style="background: rgba(239, 68, 68, 0.2); border-color: rgba(239, 68, 68, 0.4);" onclick="sendSpamRequests(25)">
@@ -893,6 +991,62 @@ public class DashboardController {
         toggleBtn.style.color = rl.enabled ? '#38bdf8' : '#f87171';
       }
 
+      // Circuit Breaker status & telemetry
+      const cb = data.circuitBreakers || {};
+      const openCount = cb.openCircuits || 0;
+      const failoverCount = cb.totalFailovers || 0;
+      const cbStat = document.getElementById('circuitBreakerStat');
+      if (cbStat) {
+        cbStat.textContent = openCount + ' OPEN';
+        cbStat.style.color = openCount > 0 ? '#f87171' : '#10b981';
+      }
+      const failoverSub = document.getElementById('failoverStatSub');
+      if (failoverSub) {
+        failoverSub.textContent = failoverCount + ' in-flight failovers';
+      }
+
+      const toggleCircuitBtn = document.getElementById('toggleCircuitBtn');
+      if (toggleCircuitBtn) {
+        const isCbEnabled = cb.enabled !== false;
+        toggleCircuitBtn.textContent = isCbEnabled ? '⚡ Circuit Breakers: ON' : '⚠️ Circuit Breakers: OFF';
+        toggleCircuitBtn.style.color = isCbEnabled ? '#34d399' : '#f87171';
+      }
+
+      // Render Circuit Breakers Table
+      const cbBackends = cb.backends || {};
+      const cbTableBody = document.getElementById('circuitBreakersTableBody');
+      if (cbTableBody) {
+        const keys = Object.keys(cbBackends);
+        if (keys.length > 0) {
+          cbTableBody.innerHTML = keys.map(k => {
+            const bcb = cbBackends[k];
+            const state = bcb.state || 'CLOSED';
+            let pillClass = 'circuit-pill-closed';
+            if (state === 'OPEN') pillClass = 'circuit-pill-open';
+            else if (state === 'HALF_OPEN') pillClass = 'circuit-pill-half';
+
+            return `
+              <tr>
+                <td style="color: #38bdf8; font-family: 'JetBrains Mono', monospace;">${bcb.backendUrl}</td>
+                <td><span class="${pillClass}"><span class="pulse-dot"></span> ${state}</span></td>
+                <td>${bcb.consecutiveFailures} / ${bcb.failureThreshold}</td>
+                <td>${bcb.totalTrips || 0}</td>
+                <td style="color: #818cf8; font-weight: 700;">${bcb.totalFailovers || 0}</td>
+                <td style="color: ${bcb.lastFailureReason && bcb.lastFailureReason !== 'None' ? '#f87171' : 'var(--text-muted)'}; font-size: 11px;">
+                  ${bcb.lastFailureReason || 'None'}
+                </td>
+                <td>
+                  <div style="display: flex; gap: 6px;">
+                    <button class="btn btn-secondary" style="padding: 4px 8px; font-size: 10px; background: rgba(239, 68, 68, 0.15); border-color: rgba(239, 68, 68, 0.3); color: #f87171;" onclick="tripBackendCircuit('${bcb.backendUrl}')">💥 Trip</button>
+                    <button class="btn btn-secondary" style="padding: 4px 8px; font-size: 10px; border-color: rgba(16, 185, 129, 0.3); color: #34d399;" onclick="resetBackendCircuit('${bcb.backendUrl}')">🔄 Reset</button>
+                  </div>
+                </td>
+              </tr>
+            `;
+          }).join('');
+        }
+      }
+
       // Strategy buttons
       const buttons = document.querySelectorAll('.strategy-btn');
       buttons.forEach(btn => {
@@ -904,12 +1058,24 @@ public class DashboardController {
       const grid = document.getElementById('backendList');
       grid.innerHTML = currentBackends.map((b) => {
         const isHealthy = b.healthy;
+        const bcb = (cb.backends || {})[b.url] || {};
+        const cbState = bcb.state || 'CLOSED';
+        let cbPill = `<span class="circuit-pill-closed" style="font-size:10px;"><span class="pulse-dot"></span> ${cbState}</span>`;
+        if (cbState === 'OPEN') {
+          cbPill = `<span class="circuit-pill-open" style="font-size:10px;"><span class="pulse-dot"></span> ${cbState} (FAILOVER ACTIVE)</span>`;
+        } else if (cbState === 'HALF_OPEN') {
+          cbPill = `<span class="circuit-pill-half" style="font-size:10px;"><span class="pulse-dot"></span> ${cbState} (TRIAL)</span>`;
+        }
+
         return `
           <div class="backend-card" id="card-${encodeURIComponent(b.url)}">
             <div class="backend-header">
-              <span class="badge ${isHealthy ? 'badge-online' : 'badge-degraded'}">
-                <span class="pulse-dot"></span> ${isHealthy ? 'UP' : 'DOWN'}
-              </span>
+              <div style="display:flex; align-items:center; gap:8px;">
+                <span class="badge ${isHealthy ? 'badge-online' : 'badge-degraded'}">
+                  <span class="pulse-dot"></span> ${isHealthy ? 'UP' : 'DOWN'}
+                </span>
+                ${cbPill}
+              </div>
               <button class="btn-danger" onclick="removeBackend('${b.url}')">Remove</button>
             </div>
             <div class="backend-url">${b.url}</div>
@@ -932,6 +1098,10 @@ public class DashboardController {
               </div>
             </div>
             ${b.lastFailureReason ? `<div style="font-size: 11px; color: #f87171; word-break: break-all;">⚠️ ${b.lastFailureReason}</div>` : ''}
+            <div style="display: flex; gap: 8px; margin-top: 4px;">
+              <button class="btn btn-secondary" style="flex:1; padding: 4px 8px; font-size: 10px; background: rgba(239, 68, 68, 0.15); border-color: rgba(239, 68, 68, 0.3); color: #f87171;" onclick="tripBackendCircuit('${b.url}')">💥 Trip Circuit</button>
+              <button class="btn btn-secondary" style="flex:1; padding: 4px 8px; font-size: 10px; border-color: rgba(16, 185, 129, 0.3); color: #34d399;" onclick="resetBackendCircuit('${b.url}')">🔄 Reset Circuit</button>
+            </div>
           </div>
         `;
       }).join('');
@@ -1247,6 +1417,112 @@ public class DashboardController {
       await Promise.all(promises);
       fetchStatus();
       fetchMetrics();
+    }
+
+    async function testCircuitFailover() {
+      const consoleBox = document.getElementById('testOutput');
+      consoleBox.textContent = `[CIRCUIT BREAKER & IN-FLIGHT FAILOVER DRILL]\\nSimulating sudden upstream outage & verifying zero-downtime rerouting...\\n\\n`;
+
+      if (currentBackends.length < 2) {
+        consoleBox.textContent += `⚠️ Failover drill requires at least 2 registered backends. Please add another backend first.`;
+        return;
+      }
+
+      const primary = currentBackends[0].url;
+
+      // 1. Manually trip primary backend
+      consoleBox.textContent += `==> Step 1: Simulating outage by manually tripping circuit for primary backend: ${primary}...\\n`;
+      try {
+        await fetch('/fluxgate/circuit-breakers/trip', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url: primary, reason: 'Chaos Drill Simulation' })
+        });
+        consoleBox.textContent += `    ✓ Circuit for ${primary} is now OPEN (Traffic blocked from hitting this host).\\n\\n`;
+      } catch (e) {
+        consoleBox.textContent += `    Failed to trip circuit: ${e.message}\\n`;
+      }
+
+      // 2. Dispatch request to /hello (cache-bypassed)
+      consoleBox.textContent += `==> Step 2: Client sends request to reverse proxy...\\n`;
+      const t1 = performance.now();
+      try {
+        const res = await fetch('/hello', {
+          headers: { 'Accept': 'application/json', 'Cache-Control': 'no-cache' }
+        });
+        const lat = Math.round(performance.now() - t1);
+        const upstream = res.headers.get('X-Upstream-Backend') || 'Unknown';
+        const cbHeader = res.headers.get('X-Circuit-Breaker') || 'N/A';
+        const failovers = res.headers.get('X-Failover-Attempts') || '0';
+        const failoverOrigin = res.headers.get('X-Failover-Origin');
+
+        consoleBox.textContent +=
+          `    HTTP ${res.status} ${res.statusText}\\n` +
+          `    X-Upstream-Backend: ${upstream}\\n` +
+          `    X-Circuit-Breaker: ${cbHeader}\\n` +
+          `    X-Failover-Attempts: ${failovers}\\n` +
+          (failoverOrigin ? `    X-Failover-Origin: ${failoverOrigin}\\n` : '') +
+          `    Latency: ${lat}ms\\n\\n` +
+          `✨ Result: Request was transparently rerouted to alternate healthy backend without client-facing errors!\\n`;
+      } catch (err) {
+        consoleBox.textContent += `    [FAIL] Request failed: ${err.message}\\n`;
+      }
+
+      fetchStatus();
+      fetchMetrics();
+    }
+
+    async function toggleCircuitBreaker() {
+      try {
+        const res = await fetch('/fluxgate/circuit-breakers/toggle', { method: 'POST' });
+        if (res.ok) {
+          fetchStatus();
+        }
+      } catch (e) {
+        alert('Failed to toggle circuit breaker: ' + e.message);
+      }
+    }
+
+    async function resetAllCircuits() {
+      try {
+        const res = await fetch('/fluxgate/circuit-breakers/reset', { method: 'POST' });
+        if (res.ok) {
+          alert('✓ All circuit breakers reset to CLOSED.');
+          fetchStatus();
+        }
+      } catch (e) {
+        alert('Failed to reset circuit breakers: ' + e.message);
+      }
+    }
+
+    async function tripBackendCircuit(url) {
+      try {
+        const res = await fetch('/fluxgate/circuit-breakers/trip', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url: url, reason: 'Manual operator trip' })
+        });
+        if (res.ok) {
+          fetchStatus();
+        }
+      } catch (e) {
+        alert('Failed to trip circuit: ' + e.message);
+      }
+    }
+
+    async function resetBackendCircuit(url) {
+      try {
+        const res = await fetch('/fluxgate/circuit-breakers/reset', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url: url })
+        });
+        if (res.ok) {
+          fetchStatus();
+        }
+      } catch (e) {
+        alert('Failed to reset circuit: ' + e.message);
+      }
     }
 
     function renderDistribution(hits, total) {

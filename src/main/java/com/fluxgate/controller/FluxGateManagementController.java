@@ -1,6 +1,7 @@
 package com.fluxgate.controller;
 
 import com.fluxgate.model.BackendServer;
+import com.fluxgate.resilience.CircuitBreakerManager;
 import com.fluxgate.service.BackendRegistry;
 import com.fluxgate.service.HealthCheckService;
 import com.fluxgate.service.RateLimiterService;
@@ -15,7 +16,7 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Exposes administrative, rate-limiting, edge cache, and telemetry monitoring endpoints for FluxGate.
+ * Exposes administrative, rate-limiting, edge cache, circuit breaker, and telemetry monitoring endpoints for FluxGate.
  */
 @RestController
 @RequestMapping("/fluxgate")
@@ -27,19 +28,22 @@ public class FluxGateManagementController {
     private final RateLimiterService rateLimiterService;
     private final ResponseCacheService responseCacheService;
     private final TrafficMetricsService trafficMetricsService;
+    private final CircuitBreakerManager circuitBreakerManager;
 
     public FluxGateManagementController(BackendRegistry backendRegistry,
                                         HealthCheckService healthCheckService,
                                         LoadBalancingStrategyManager strategyManager,
                                         RateLimiterService rateLimiterService,
                                         ResponseCacheService responseCacheService,
-                                        TrafficMetricsService trafficMetricsService) {
+                                        TrafficMetricsService trafficMetricsService,
+                                        CircuitBreakerManager circuitBreakerManager) {
         this.backendRegistry = backendRegistry;
         this.healthCheckService = healthCheckService;
         this.strategyManager = strategyManager;
         this.rateLimiterService = rateLimiterService;
         this.responseCacheService = responseCacheService;
         this.trafficMetricsService = trafficMetricsService;
+        this.circuitBreakerManager = circuitBreakerManager;
     }
 
     /**
@@ -58,12 +62,14 @@ public class FluxGateManagementController {
         response.put("strategy", strategyManager.getActiveStrategyName());
         response.put("rateLimiterEnabled", rateLimiterService.isEnabled());
         response.put("edgeCacheEnabled", responseCacheService.isEnabled());
+        response.put("circuitBreakersOpen", circuitBreakerManager.getTelemetry().get("openCircuits"));
+        response.put("circuitBreakerEnabled", circuitBreakerManager.isEnabled());
 
         return ResponseEntity.ok(response);
     }
 
     /**
-     * Returns full status information for all registered backend instances, rate limiter, and edge cache.
+     * Returns full status information for all registered backend instances, rate limiter, edge cache, and circuit breakers.
      */
     @GetMapping("/status")
     public ResponseEntity<Map<String, Object>> getStatus() {
@@ -84,6 +90,7 @@ public class FluxGateManagementController {
                 "blockedRequests", rateLimiterService.getTotalBlockedRequests()
         ));
         response.put("cache", responseCacheService.getStats());
+        response.put("circuitBreakers", circuitBreakerManager.getTelemetry());
         response.put("metrics", Map.of(
                 "totalRequests", trafficMetricsService.getTotalRequests(),
                 "averageLatencyMs", trafficMetricsService.getAverageLatencyMs(),
@@ -297,5 +304,70 @@ public class FluxGateManagementController {
         } else {
             return ResponseEntity.notFound().build();
         }
+    }
+
+    /**
+     * Returns full circuit breaker telemetry for all backends.
+     */
+    @GetMapping("/circuit-breakers")
+    public ResponseEntity<Map<String, Object>> getCircuitBreakers() {
+        return ResponseEntity.ok(circuitBreakerManager.getTelemetry());
+    }
+
+    /**
+     * Resets a specific backend circuit breaker or all circuit breakers to CLOSED.
+     */
+    @PostMapping("/circuit-breakers/reset")
+    public ResponseEntity<Map<String, Object>> resetCircuitBreakers(@RequestBody(required = false) Map<String, String> body) {
+        String url = (body != null) ? body.get("url") : null;
+        if (url != null && !url.isBlank()) {
+            circuitBreakerManager.reset(url);
+            return ResponseEntity.ok(Map.of(
+                    "message", "Circuit breaker for backend reset to CLOSED",
+                    "backendUrl", url,
+                    "telemetry", circuitBreakerManager.getCircuitBreaker(url).getTelemetry()
+            ));
+        } else {
+            circuitBreakerManager.resetAll();
+            return ResponseEntity.ok(Map.of(
+                    "message", "All circuit breakers reset to CLOSED",
+                    "telemetry", circuitBreakerManager.getTelemetry()
+            ));
+        }
+    }
+
+    /**
+     * Manually trips a backend circuit breaker to OPEN for chaos drill / resilience testing.
+     */
+    @PostMapping("/circuit-breakers/trip")
+    public ResponseEntity<Map<String, Object>> tripCircuitBreaker(@RequestBody Map<String, String> body) {
+        String url = body.get("url");
+        String reason = body.getOrDefault("reason", "Manual chaos simulation drill");
+        if (url == null || url.isBlank()) {
+            return ResponseEntity.badRequest().body(Map.of("error", "Field 'url' is required"));
+        }
+        circuitBreakerManager.trip(url, reason);
+        return ResponseEntity.ok(Map.of(
+                "message", "Circuit breaker manually tripped to OPEN",
+                "backendUrl", url,
+                "reason", reason,
+                "telemetry", circuitBreakerManager.getCircuitBreaker(url).getTelemetry()
+        ));
+    }
+
+    /**
+     * Enables or disables circuit breaker enforcement.
+     */
+    @PostMapping("/circuit-breakers/toggle")
+    public ResponseEntity<Map<String, Object>> toggleCircuitBreaker(@RequestBody(required = false) Map<String, Boolean> body) {
+        boolean newState = (body != null && body.containsKey("enabled"))
+                ? body.get("enabled")
+                : !circuitBreakerManager.isEnabled();
+
+        circuitBreakerManager.setEnabled(newState);
+        return ResponseEntity.ok(Map.of(
+                "message", "Circuit breaker enabled status updated",
+                "enabled", circuitBreakerManager.isEnabled()
+        ));
     }
 }

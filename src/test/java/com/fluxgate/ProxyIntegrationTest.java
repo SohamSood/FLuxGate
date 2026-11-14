@@ -43,6 +43,9 @@ class ProxyIntegrationTest {
     @Autowired
     private com.fluxgate.service.ResponseCacheService responseCacheService;
 
+    @Autowired
+    private com.fluxgate.resilience.CircuitBreakerManager circuitBreakerManager;
+
     private static HttpServer server1;
     private static HttpServer server2;
     private static HttpServer server3;
@@ -243,5 +246,30 @@ class ProxyIntegrationTest {
         } finally {
             responseCacheService.setEnabled(false);
         }
+    }
+
+    @Test
+    @DisplayName("Should detect tripped circuit and transparently route around failed backend")
+    void testCircuitBreakerAndInFlightFailover() {
+        circuitBreakerManager.resetAll();
+
+        // Trip url1 so traffic avoids it
+        circuitBreakerManager.trip(url1, "Integration Test Chaos Outage");
+        assertEquals("OPEN", circuitBreakerManager.getCircuitBreaker(url1).getState().name());
+
+        // Send request -> should be serviced cleanly by url2 or url3
+        ResponseEntity<String> response = restTemplate.getForEntity(getBaseUrl() + "/api/echo?failoverTest=true", String.class);
+        assertEquals(HttpStatus.OK, response.getStatusCode());
+        assertNotNull(response.getHeaders().getFirst("X-Circuit-Breaker"));
+        String upstream = response.getHeaders().getFirst("X-Upstream-Backend");
+        assertNotEquals(url1, upstream, "Traffic should have bypassed tripped backend url1");
+
+        // Verify management endpoint
+        ResponseEntity<Map> cbResp = restTemplate.getForEntity(getBaseUrl() + "/fluxgate/circuit-breakers", Map.class);
+        assertEquals(HttpStatus.OK, cbResp.getStatusCode());
+        assertEquals(true, cbResp.getBody().get("enabled"));
+        assertEquals(1, (int) cbResp.getBody().get("openCircuits"));
+
+        circuitBreakerManager.resetAll();
     }
 }

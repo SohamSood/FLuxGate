@@ -17,7 +17,7 @@
 
 **FluxGate** is an enterprise-grade, high-performance reverse proxy and load balancing system built with **Spring Boot 3** and **Java 21**. It functions as a unified ingress gateway that dynamically routes, balances, and monitors traffic across distributed backend microservices.
 
-Featuring an **interactive Web Dashboard**, **High-Speed Edge Response Cache & Accelerator** (sub-millisecond hits, RFC 7234 semantics, and auto-invalidation), **Traffic Guardian Adaptive Rate Limiter** (token-bucket per IP), **real-time Ingress Stream observability**, **dynamic algorithm switching** (Round Robin, Least Connections, Random), **automated health monitoring**, **embedded demo backend servers**, and **runtime backend registration**.
+Featuring an **interactive Web Dashboard**, **Enterprise Dynamic Circuit Breaker & Automatic In-Flight Failover** (state machine: CLOSED &rarr; OPEN &rarr; HALF_OPEN, zero-downtime traffic rerouting, and chaos drills), **High-Speed Edge Response Cache & Accelerator** (sub-millisecond hits, RFC 7234 semantics, and auto-invalidation), **Traffic Guardian Adaptive Rate Limiter** (token-bucket per IP), **real-time Ingress Stream observability**, **dynamic algorithm switching** (Round Robin, Least Connections, Random), **automated health monitoring**, **embedded demo backend servers**, and **runtime backend registration**.
 
 ---
 
@@ -27,16 +27,17 @@ FluxGate is actively deployed on **Render**:
 
 | Interface / Endpoint | Method | Live Link | Description |
 | :--- | :---: | :--- | :--- |
-| **Interactive Dashboard** | `GET` | [`/`](https://fluxgate-bvjt.onrender.com/) or [`/dashboard`](https://fluxgate-bvjt.onrender.com/dashboard) | Real-time visual metrics, edge cache controls, rate limiter control, live traffic stream, backend manager & proxy simulator |
-| **System Status** | `GET` | [`/fluxgate/status`](https://fluxgate-bvjt.onrender.com/fluxgate/status) | Real-time health metrics, active strategy, cache stats, rate limiter state & backend telemetry (JSON) |
+| **Interactive Dashboard** | `GET` | [`/`](https://fluxgate-bvjt.onrender.com/) or [`/dashboard`](https://fluxgate-bvjt.onrender.com/dashboard) | Real-time visual metrics, circuit breaker controls, edge cache, rate limiter, live traffic stream & proxy simulator |
+| **System Status** | `GET` | [`/fluxgate/status`](https://fluxgate-bvjt.onrender.com/fluxgate/status) | Real-time health metrics, active strategy, circuit breaker state, cache stats & backend telemetry (JSON) |
 | **Self-Health Probe** | `GET` | [`/fluxgate/health`](https://fluxgate-bvjt.onrender.com/fluxgate/health) | Orchestrator health check (Render / K8s / ECS) |
+| **Circuit Breakers API** | `GET`/`POST` | [`/fluxgate/circuit-breakers`](https://fluxgate-bvjt.onrender.com/fluxgate/circuit-breakers) | Inspect state (CLOSED/OPEN/HALF_OPEN), trip backend for chaos drill, or reset circuits |
 | **Edge Cache API** | `GET`/`POST`/`DELETE` | [`/fluxgate/cache`](https://fluxgate-bvjt.onrender.com/fluxgate/cache) | Inspect hit ratio & cached routes, dynamically update TTL/max entries, or purge cache entries |
 | **Rate Limiter Policy** | `GET`/`POST` | [`/fluxgate/rate-limit`](https://fluxgate-bvjt.onrender.com/fluxgate/rate-limit) | Inspect or dynamically reconfigure token-bucket capacity and refill rate |
 | **Traffic Stream & Metrics** | `GET`/`DELETE` | [`/fluxgate/metrics`](https://fluxgate-bvjt.onrender.com/fluxgate/metrics) | Real-time stream of recent transactions, cache hit badges, status code breakdowns, and latency metrics |
 | **Strategy Control** | `GET`/`POST` | [`/fluxgate/strategy`](https://fluxgate-bvjt.onrender.com/fluxgate/strategy) | View or update active load balancing strategy dynamically |
 | **Manual Probe** | `POST` | `/fluxgate/health-check` | Triggers an immediate health probe across all registered backends |
 | **Dynamic Backends** | `POST`/`DELETE` | `/fluxgate/backends` | Add or remove backend instances at runtime |
-| **Reverse Proxy Route** | `ANY` | [`/hello`](https://fluxgate-bvjt.onrender.com/hello) | Transparently balanced, cached & rate-limited reverse proxy route returning upstream identity |
+| **Reverse Proxy Route** | `ANY` | [`/hello`](https://fluxgate-bvjt.onrender.com/hello) | Transparently balanced, cached, circuit-protected & rate-limited reverse proxy route |
 
 ---
 
@@ -82,7 +83,7 @@ Clients  ────────▶ [ FluxGate:8080 ] ────────�
 git clone https://github.com/SohamSood/FLuxGate.git
 cd FLuxGate
 
-# Run all tests (17 passing unit & integration tests)
+# Run all tests (40 passing unit & integration tests)
 ./mvnw clean test
 
 # Run application locally on port 8080
@@ -144,6 +145,24 @@ X-Proxy-Latency: 0ms (Edge Cache)
 X-Proxy-By: FluxGate
 ```
 
+### Testing Dynamic Circuit Breaker & Automatic Failover
+```bash
+# 1. Manually trip a backend to OPEN state for chaos drill
+curl -X POST https://fluxgate-bvjt.onrender.com/fluxgate/circuit-breakers/trip \
+     -H "Content-Type: application/json" \
+     -d '{"url":"http://localhost:8081","reason":"Chaos Drill Simulation"}'
+
+# 2. Send request to reverse proxy -> transparently rerouted to alternate backend
+curl -i https://fluxgate-bvjt.onrender.com/hello
+```
+Headers will report the active circuit state and failover metrics:
+```http
+HTTP/1.1 200 OK
+X-Circuit-Breaker: CLOSED
+X-Failover-Attempts: 0
+X-Upstream-Backend: http://localhost:8082
+```
+
 ---
 
 ## ⚙️ Configuration Properties
@@ -152,6 +171,10 @@ X-Proxy-By: FluxGate
 | :--- | :--- | :--- | :--- |
 | `server.port` | `8080` | `PORT` | Listening port for FluxGate |
 | `fluxgate.backends` | `http://localhost:8081,...` | `FLUXGATE_BACKENDS` | Comma-separated list of target backend URLs |
+| `fluxgate.circuit-breaker.enabled` | `true` | `FLUXGATE_CIRCUIT_BREAKER_ENABLED` | Enable automated failure isolation and transparent failover |
+| `fluxgate.circuit-breaker.failure-threshold` | `3` | `FLUXGATE_CB_FAILURE_THRESHOLD` | Consecutive failures before tripping circuit from CLOSED to OPEN |
+| `fluxgate.circuit-breaker.recovery-timeout-seconds` | `15` | `FLUXGATE_CB_RECOVERY_TIMEOUT` | Seconds in OPEN state before transitioning to HALF_OPEN probe |
+| `fluxgate.circuit-breaker.half-open-trial-requests` | `2` | `FLUXGATE_CB_TRIAL_REQUESTS` | Successful trial requests required in HALF_OPEN to close circuit |
 | `fluxgate.demo-backends.enabled` | `true` | `FLUXGATE_DEMO_BACKENDS_ENABLED` | Auto-start embedded workers for single-container cloud hosting |
 | `fluxgate.cache.enabled` | `true` | `FLUXGATE_CACHE_ENABLED` | Enable in-memory RFC 7234 edge response caching |
 | `fluxgate.cache.default-ttl-seconds` | `30` | `FLUXGATE_CACHE_TTL` | Default time-to-live for cached GET responses |

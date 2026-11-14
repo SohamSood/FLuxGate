@@ -4,7 +4,10 @@ import com.fluxgate.model.BackendServer;
 import com.fluxgate.model.CachedResponse;
 import com.fluxgate.model.ProxyResponse;
 import com.fluxgate.model.RateLimitResult;
+import com.fluxgate.resilience.CircuitBreakerManager;
+import com.fluxgate.service.BadGatewayException;
 import com.fluxgate.service.BackendRegistry;
+import com.fluxgate.service.GatewayTimeoutException;
 import com.fluxgate.service.NoHealthyBackendException;
 import com.fluxgate.service.ProxyService;
 import com.fluxgate.service.RateLimiterService;
@@ -12,6 +15,8 @@ import com.fluxgate.service.ResponseCacheService;
 import com.fluxgate.service.TrafficMetricsService;
 import com.fluxgate.strategy.LoadBalancingStrategy;
 import jakarta.servlet.http.HttpServletRequest;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
@@ -21,14 +26,18 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.Optional;
 
 /**
  * Catch-all reverse proxy controller: enforces rate limits, manages edge response caching,
- * routes traffic via load balancing strategies, and captures telemetry.
+ * routes traffic via load balancing strategies, manages circuit breakers, and executes
+ * automatic in-flight failover protection.
  */
 @RestController
 public class ReverseProxyController {
+
+    private static final Logger log = LoggerFactory.getLogger(ReverseProxyController.class);
 
     private final BackendRegistry backendRegistry;
     private final LoadBalancingStrategy loadBalancingStrategy;
@@ -36,19 +45,22 @@ public class ReverseProxyController {
     private final RateLimiterService rateLimiterService;
     private final ResponseCacheService responseCacheService;
     private final TrafficMetricsService trafficMetricsService;
+    private final CircuitBreakerManager circuitBreakerManager;
 
     public ReverseProxyController(BackendRegistry backendRegistry,
                                   LoadBalancingStrategy loadBalancingStrategy,
                                   ProxyService proxyService,
                                   RateLimiterService rateLimiterService,
                                   ResponseCacheService responseCacheService,
-                                  TrafficMetricsService trafficMetricsService) {
+                                  TrafficMetricsService trafficMetricsService,
+                                  CircuitBreakerManager circuitBreakerManager) {
         this.backendRegistry = backendRegistry;
         this.loadBalancingStrategy = loadBalancingStrategy;
         this.proxyService = proxyService;
         this.rateLimiterService = rateLimiterService;
         this.responseCacheService = responseCacheService;
         this.trafficMetricsService = trafficMetricsService;
+        this.circuitBreakerManager = circuitBreakerManager;
     }
 
     @RequestMapping(value = "/**")
@@ -127,6 +139,8 @@ public class ReverseProxyController {
                 responseHeaders.set("X-Upstream-Backend", cached.getOriginBackend());
                 responseHeaders.set("X-RateLimit-Limit", String.valueOf(rateLimitResult.getCapacity()));
                 responseHeaders.set("X-RateLimit-Remaining", String.valueOf(rateLimitResult.getRemainingTokens()));
+                responseHeaders.set("X-Circuit-Breaker", "BYPASS (Edge Cache)");
+                responseHeaders.set("X-Failover-Attempts", "0");
 
                 return ResponseEntity
                         .status(cached.getStatusCode())
@@ -135,14 +149,78 @@ public class ReverseProxyController {
             }
         }
 
-        // 2. Cache Miss or Mutating Request: Route through upstream backend
-        BackendServer backend = loadBalancingStrategy.select(backendRegistry.getAllBackends())
+        // 2. Select initial backend with Circuit Breaker filter
+        List<BackendServer> permittedBackends = backendRegistry.getHealthyBackends().stream()
+                .filter(b -> circuitBreakerManager.isRequestPermitted(b.getUrl()))
+                .toList();
+
+        List<BackendServer> selectionPool = !permittedBackends.isEmpty()
+                ? permittedBackends
+                : backendRegistry.getAllBackends();
+
+        BackendServer backend = loadBalancingStrategy.select(selectionPool)
                 .orElseThrow(() -> new NoHealthyBackendException(
                         "No healthy backend instances available to handle the request: " + request.getRequestURI()));
 
-        ProxyResponse proxyResponse = proxyService.forward(request, body, backend);
+        // Check if circuit breaker allows request to primary backend
+        if (!circuitBreakerManager.allowRequest(backend.getUrl())) {
+            Optional<BackendServer> alternateOpt = selectFailoverBackend(backend);
+            if (alternateOpt.isPresent()) {
+                backend = alternateOpt.get();
+                circuitBreakerManager.allowRequest(backend.getUrl());
+            }
+        }
 
-        // 3. Determine cache status & handle store or invalidation
+        // 3. Forward request with automatic in-flight failover protection
+        ProxyResponse proxyResponse;
+        BackendServer activeBackend = backend;
+        int failoverAttempts = 0;
+        String failoverOrigin = null;
+
+        try {
+            proxyResponse = proxyService.forward(request, body, activeBackend);
+
+            // If upstream returns 5xx error, record failure in circuit breaker and attempt transparent in-flight failover
+            if (proxyResponse.getStatusCode() >= 500) {
+                String failureReason = "HTTP " + proxyResponse.getStatusCode() + " upstream error";
+                circuitBreakerManager.recordFailure(activeBackend.getUrl(), failureReason);
+
+                Optional<BackendServer> failoverOpt = selectFailoverBackend(activeBackend);
+                if (failoverOpt.isPresent()) {
+                    BackendServer alternate = failoverOpt.get();
+                    failoverOrigin = activeBackend.getUrl();
+                    activeBackend = alternate;
+                    failoverAttempts++;
+                    circuitBreakerManager.recordFailover(failoverOrigin);
+                    log.warn("[IN-FLIGHT FAILOVER] Backend {} returned 5xx. Transparently rerouting request to alternate backend {}",
+                            failoverOrigin, activeBackend.getUrl());
+                    proxyResponse = proxyService.forward(request, body, activeBackend);
+                }
+            }
+        } catch (BadGatewayException | GatewayTimeoutException ex) {
+            String failureReason = ex.getMessage();
+            circuitBreakerManager.recordFailure(activeBackend.getUrl(), failureReason);
+
+            Optional<BackendServer> failoverOpt = selectFailoverBackend(activeBackend);
+            if (failoverOpt.isPresent()) {
+                BackendServer alternate = failoverOpt.get();
+                failoverOrigin = activeBackend.getUrl();
+                activeBackend = alternate;
+                failoverAttempts++;
+                circuitBreakerManager.recordFailover(failoverOrigin);
+                log.warn("[IN-FLIGHT FAILOVER] Backend {} failed ({}). Transparently rerouting request to alternate backend {}",
+                        failoverOrigin, failureReason, activeBackend.getUrl());
+                proxyResponse = proxyService.forward(request, body, activeBackend);
+            } else {
+                throw ex;
+            }
+        }
+
+        if (proxyResponse.getStatusCode() < 500) {
+            circuitBreakerManager.recordSuccess(activeBackend.getUrl());
+        }
+
+        // 4. Determine cache status & handle store or invalidation
         String cacheStatus;
         if (isCacheableMethod) {
             if (cacheBypassRequested || !responseCacheService.isEnabled()) {
@@ -155,7 +233,7 @@ public class ReverseProxyController {
                             proxyResponse.getStatusCode(),
                             proxyResponse.getHeaders(),
                             proxyResponse.getBody(),
-                            backend.getUrl()
+                            activeBackend.getUrl()
                     );
                 }
             }
@@ -165,11 +243,16 @@ public class ReverseProxyController {
             cacheStatus = "BYPASS";
         }
 
+        String routeLabel = activeBackend.getUrl();
+        if (failoverAttempts > 0) {
+            routeLabel += " (Failover from " + failoverOrigin + ")";
+        }
+
         trafficMetricsService.record(
                 clientIp,
                 method,
                 uri,
-                backend.getUrl(),
+                routeLabel,
                 proxyResponse.getStatusCode(),
                 proxyResponse.getLatencyMs(),
                 false,
@@ -181,11 +264,28 @@ public class ReverseProxyController {
         responseHeaders.set("X-Cache", cacheStatus);
         responseHeaders.set("X-RateLimit-Limit", String.valueOf(rateLimitResult.getCapacity()));
         responseHeaders.set("X-RateLimit-Remaining", String.valueOf(rateLimitResult.getRemainingTokens()));
+        responseHeaders.set("X-Circuit-Breaker", circuitBreakerManager.getCircuitBreaker(activeBackend.getUrl()).getState().name());
+        responseHeaders.set("X-Failover-Attempts", String.valueOf(failoverAttempts));
+        if (failoverOrigin != null) {
+            responseHeaders.set("X-Failover-Origin", failoverOrigin);
+            responseHeaders.set("X-Failover-Target", activeBackend.getUrl());
+        }
 
         return ResponseEntity
                 .status(proxyResponse.getStatusCode())
                 .headers(responseHeaders)
                 .body(proxyResponse.getBody());
+    }
+
+    private Optional<BackendServer> selectFailoverBackend(BackendServer failedBackend) {
+        List<BackendServer> candidates = backendRegistry.getHealthyBackends().stream()
+                .filter(b -> !b.getUrl().equalsIgnoreCase(failedBackend.getUrl()))
+                .filter(b -> circuitBreakerManager.isRequestPermitted(b.getUrl()))
+                .toList();
+        if (!candidates.isEmpty()) {
+            return loadBalancingStrategy.select(candidates);
+        }
+        return Optional.empty();
     }
 
     private boolean isBypassCacheRequested(HttpServletRequest request) {

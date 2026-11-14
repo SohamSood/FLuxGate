@@ -108,3 +108,4 @@ class ResponseCacheServiceTest {
         assertEquals(1, stats.get("entriesCount"));
     }
 }
+
