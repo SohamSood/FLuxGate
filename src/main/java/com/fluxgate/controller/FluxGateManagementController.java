@@ -5,6 +5,7 @@ import com.fluxgate.resilience.CircuitBreakerManager;
 import com.fluxgate.service.BackendRegistry;
 import com.fluxgate.service.HealthCheckService;
 import com.fluxgate.service.RateLimiterService;
+import com.fluxgate.service.RequestCoalescingService;
 import com.fluxgate.service.ResponseCacheService;
 import com.fluxgate.service.TrafficMetricsService;
 import com.fluxgate.strategy.LoadBalancingStrategyManager;
@@ -29,6 +30,7 @@ public class FluxGateManagementController {
     private final ResponseCacheService responseCacheService;
     private final TrafficMetricsService trafficMetricsService;
     private final CircuitBreakerManager circuitBreakerManager;
+    private final RequestCoalescingService requestCoalescingService;
 
     public FluxGateManagementController(BackendRegistry backendRegistry,
                                         HealthCheckService healthCheckService,
@@ -36,7 +38,8 @@ public class FluxGateManagementController {
                                         RateLimiterService rateLimiterService,
                                         ResponseCacheService responseCacheService,
                                         TrafficMetricsService trafficMetricsService,
-                                        CircuitBreakerManager circuitBreakerManager) {
+                                        CircuitBreakerManager circuitBreakerManager,
+                                        RequestCoalescingService requestCoalescingService) {
         this.backendRegistry = backendRegistry;
         this.healthCheckService = healthCheckService;
         this.strategyManager = strategyManager;
@@ -44,6 +47,7 @@ public class FluxGateManagementController {
         this.responseCacheService = responseCacheService;
         this.trafficMetricsService = trafficMetricsService;
         this.circuitBreakerManager = circuitBreakerManager;
+        this.requestCoalescingService = requestCoalescingService;
     }
 
     /**
@@ -62,6 +66,8 @@ public class FluxGateManagementController {
         response.put("strategy", strategyManager.getActiveStrategyName());
         response.put("rateLimiterEnabled", rateLimiterService.isEnabled());
         response.put("edgeCacheEnabled", responseCacheService.isEnabled());
+        response.put("coalescingEnabled", requestCoalescingService.isEnabled());
+        response.put("upstreamCallsSaved", requestCoalescingService.getUpstreamCallsSaved());
         response.put("circuitBreakersOpen", circuitBreakerManager.getTelemetry().get("openCircuits"));
         response.put("circuitBreakerEnabled", circuitBreakerManager.isEnabled());
 
@@ -69,7 +75,7 @@ public class FluxGateManagementController {
     }
 
     /**
-     * Returns full status information for all registered backend instances, rate limiter, edge cache, and circuit breakers.
+     * Returns full status information for all registered backend instances, rate limiter, edge cache, circuit breakers, and request coalescing.
      */
     @GetMapping("/status")
     public ResponseEntity<Map<String, Object>> getStatus() {
@@ -90,6 +96,7 @@ public class FluxGateManagementController {
                 "blockedRequests", rateLimiterService.getTotalBlockedRequests()
         ));
         response.put("cache", responseCacheService.getStats());
+        response.put("coalescing", requestCoalescingService.getStats());
         response.put("circuitBreakers", circuitBreakerManager.getTelemetry());
         response.put("metrics", Map.of(
                 "totalRequests", trafficMetricsService.getTotalRequests(),
@@ -97,7 +104,8 @@ public class FluxGateManagementController {
                 "status2xx", trafficMetricsService.getTotal2xx(),
                 "status4xx", trafficMetricsService.getTotal4xx(),
                 "status5xx", trafficMetricsService.getTotal5xx(),
-                "cacheHits", trafficMetricsService.getTotalCacheHits()
+                "cacheHits", trafficMetricsService.getTotalCacheHits(),
+                "coalescedRequests", trafficMetricsService.getTotalCoalesced()
         ));
 
         return ResponseEntity.ok(response);
@@ -276,21 +284,82 @@ public class FluxGateManagementController {
     }
 
     /**
-     * Registers a new backend URL dynamically at runtime.
+     * Registers a new backend URL dynamically at runtime with optional weight.
      */
     @PostMapping("/backends")
-    public ResponseEntity<Map<String, Object>> addBackend(@RequestBody Map<String, String> body) {
-        String url = body.get("url");
+    public ResponseEntity<Map<String, Object>> addBackend(@RequestBody Map<String, Object> body) {
+        String url = body.get("url") != null ? body.get("url").toString() : null;
         if (url == null || url.isBlank()) {
             return ResponseEntity.badRequest().body(Map.of("error", "Field 'url' is required"));
         }
-        BackendServer server = backendRegistry.registerBackend(url);
+        int weight = 1;
+        if (body.containsKey("weight")) {
+            try {
+                weight = Integer.parseInt(body.get("weight").toString());
+            } catch (NumberFormatException ignored) {}
+        }
+        BackendServer server = backendRegistry.registerBackend(url, weight);
         healthCheckService.checkBackend(server);
 
         return ResponseEntity.ok(Map.of(
                 "message", "Backend registered successfully",
                 "backend", server
         ));
+    }
+
+    /**
+     * Updates the weight of a registered backend dynamically at runtime.
+     */
+    @PostMapping("/backends/weight")
+    public ResponseEntity<Map<String, Object>> updateBackendWeight(@RequestBody Map<String, Object> body) {
+        String url = body.get("url") != null ? body.get("url").toString() : null;
+        if (url == null || url.isBlank()) {
+            return ResponseEntity.badRequest().body(Map.of("error", "Field 'url' is required"));
+        }
+        int weight = 1;
+        if (body.containsKey("weight")) {
+            try {
+                weight = Integer.parseInt(body.get("weight").toString());
+            } catch (NumberFormatException ignored) {}
+        }
+        boolean updated = backendRegistry.setBackendWeight(url, weight);
+        if (updated) {
+            return ResponseEntity.ok(Map.of(
+                    "message", "Backend weight updated successfully",
+                    "url", url,
+                    "weight", weight
+            ));
+        } else {
+            return ResponseEntity.notFound().build();
+        }
+    }
+
+    /**
+     * Returns SingleFlight request coalescing telemetry and efficiency statistics.
+     */
+    @GetMapping("/coalescing")
+    public ResponseEntity<Map<String, Object>> getCoalescingStats() {
+        return ResponseEntity.ok(requestCoalescingService.getStats());
+    }
+
+    /**
+     * Dynamically updates SingleFlight request coalescing settings.
+     */
+    @PostMapping("/coalescing")
+    public ResponseEntity<Map<String, Object>> updateCoalescingConfig(
+            @RequestParam(required = false) Boolean enabled,
+            @RequestParam(required = false) Long timeoutMs) {
+
+        if (enabled != null) {
+            requestCoalescingService.setEnabled(enabled);
+        }
+        if (timeoutMs != null) {
+            requestCoalescingService.setTimeoutMs(timeoutMs);
+        }
+
+        Map<String, Object> res = new HashMap<>(requestCoalescingService.getStats());
+        res.put("message", "Request coalescing configuration updated successfully");
+        return ResponseEntity.ok(res);
     }
 
     /**

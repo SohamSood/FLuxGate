@@ -26,6 +26,7 @@ public class TrafficMetricsService {
     private final AtomicLong total5xx = new AtomicLong(0);
     private final AtomicLong totalLatencyMs = new AtomicLong(0);
     private final AtomicLong totalCacheHits = new AtomicLong(0);
+    private final AtomicLong totalCoalesced = new AtomicLong(0);
 
     /**
      * Records a completed transaction or throttled request with default cache status.
@@ -48,6 +49,8 @@ public class TrafficMetricsService {
 
         if ("HIT".equalsIgnoreCase(cacheStatus)) {
             totalCacheHits.incrementAndGet();
+        } else if ("COALESCED".equalsIgnoreCase(cacheStatus)) {
+            totalCoalesced.incrementAndGet();
         }
 
         if (statusCode >= 200 && statusCode < 300) {
@@ -100,6 +103,10 @@ public class TrafficMetricsService {
         return totalCacheHits.get();
     }
 
+    public long getTotalCoalesced() {
+        return totalCoalesced.get();
+    }
+
     public double getAverageLatencyMs() {
         long count = totalRequests.get();
         if (count == 0) {
@@ -116,5 +123,6 @@ public class TrafficMetricsService {
         total5xx.set(0);
         totalLatencyMs.set(0);
         totalCacheHits.set(0);
+        totalCoalesced.set(0);
     }
 }

@@ -11,6 +11,7 @@ import com.fluxgate.service.GatewayTimeoutException;
 import com.fluxgate.service.NoHealthyBackendException;
 import com.fluxgate.service.ProxyService;
 import com.fluxgate.service.RateLimiterService;
+import com.fluxgate.service.RequestCoalescingService;
 import com.fluxgate.service.ResponseCacheService;
 import com.fluxgate.service.TrafficMetricsService;
 import com.fluxgate.strategy.LoadBalancingStrategy;
@@ -46,6 +47,7 @@ public class ReverseProxyController {
     private final ResponseCacheService responseCacheService;
     private final TrafficMetricsService trafficMetricsService;
     private final CircuitBreakerManager circuitBreakerManager;
+    private final RequestCoalescingService requestCoalescingService;
 
     public ReverseProxyController(BackendRegistry backendRegistry,
                                   LoadBalancingStrategy loadBalancingStrategy,
@@ -53,7 +55,8 @@ public class ReverseProxyController {
                                   RateLimiterService rateLimiterService,
                                   ResponseCacheService responseCacheService,
                                   TrafficMetricsService trafficMetricsService,
-                                  CircuitBreakerManager circuitBreakerManager) {
+                                  CircuitBreakerManager circuitBreakerManager,
+                                  RequestCoalescingService requestCoalescingService) {
         this.backendRegistry = backendRegistry;
         this.loadBalancingStrategy = loadBalancingStrategy;
         this.proxyService = proxyService;
@@ -61,6 +64,7 @@ public class ReverseProxyController {
         this.responseCacheService = responseCacheService;
         this.trafficMetricsService = trafficMetricsService;
         this.circuitBreakerManager = circuitBreakerManager;
+        this.requestCoalescingService = requestCoalescingService;
     }
 
     @RequestMapping(value = "/**")
@@ -149,7 +153,78 @@ public class ReverseProxyController {
             }
         }
 
-        // 2. Select initial backend with Circuit Breaker filter
+        // 2. Forward request through SingleFlight coalescing (for idempotent reads) or direct dispatch
+        RequestCoalescingService.CoalescedResult coalescedResult;
+        if (isCacheableMethod) {
+            coalescedResult = requestCoalescingService.execute(cacheKey,
+                    () -> executeForwardWithFailover(request, body, cacheKey, true));
+        } else {
+            // State mutation: invalidate cache and dispatch directly without coalescing
+            responseCacheService.invalidatePath(uri);
+            RequestCoalescingService.CoalescedExecutionResult exec =
+                    executeForwardWithFailover(request, body, cacheKey, false);
+            coalescedResult = new RequestCoalescingService.CoalescedResult(
+                    exec.getResponse(), false, 0, exec.getOriginBackend(),
+                    exec.getFailoverAttempts(), exec.getFailoverOrigin()
+            );
+        }
+
+        ProxyResponse proxyResponse = coalescedResult.getResponse();
+        boolean wasCoalesced = coalescedResult.isCoalesced();
+        int waiterCount = coalescedResult.getWaiterCount();
+
+        // 3. Determine cache & coalescing status
+        String cacheStatus;
+        if (wasCoalesced) {
+            cacheStatus = "COALESCED";
+        } else if (isCacheableMethod) {
+            cacheStatus = cacheBypassRequested || !responseCacheService.isEnabled() ? "BYPASS" : "MISS";
+        } else {
+            cacheStatus = "BYPASS";
+        }
+
+        String routeLabel = coalescedResult.getOriginBackend();
+        if (wasCoalesced) {
+            routeLabel += " (SingleFlight Coalesced)";
+        } else if (coalescedResult.getFailoverAttempts() > 0) {
+            routeLabel += " (Failover from " + coalescedResult.getFailoverOrigin() + ")";
+        }
+
+        trafficMetricsService.record(
+                clientIp,
+                method,
+                uri,
+                routeLabel,
+                proxyResponse.getStatusCode(),
+                proxyResponse.getLatencyMs(),
+                false,
+                cacheStatus
+        );
+
+        HttpHeaders responseHeaders = new HttpHeaders();
+        responseHeaders.addAll(proxyResponse.getHeaders());
+        responseHeaders.set("X-Cache", cacheStatus);
+        responseHeaders.set("X-Coalesced", String.valueOf(wasCoalesced));
+        responseHeaders.set("X-Coalesced-Waiters", String.valueOf(waiterCount));
+        responseHeaders.set("X-RateLimit-Limit", String.valueOf(rateLimitResult.getCapacity()));
+        responseHeaders.set("X-RateLimit-Remaining", String.valueOf(rateLimitResult.getRemainingTokens()));
+        responseHeaders.set("X-Circuit-Breaker", circuitBreakerManager.getCircuitBreaker(coalescedResult.getOriginBackend()).getState().name());
+        responseHeaders.set("X-Failover-Attempts", String.valueOf(coalescedResult.getFailoverAttempts()));
+        if (coalescedResult.getFailoverOrigin() != null) {
+            responseHeaders.set("X-Failover-Origin", coalescedResult.getFailoverOrigin());
+            responseHeaders.set("X-Failover-Target", coalescedResult.getOriginBackend());
+        }
+
+        return ResponseEntity
+                .status(proxyResponse.getStatusCode())
+                .headers(responseHeaders)
+                .body(proxyResponse.getBody());
+    }
+
+    private RequestCoalescingService.CoalescedExecutionResult executeForwardWithFailover(
+            HttpServletRequest request, byte[] body, String cacheKey, boolean isCacheableMethod) {
+
+        // Select initial backend with Circuit Breaker filter
         List<BackendServer> permittedBackends = backendRegistry.getHealthyBackends().stream()
                 .filter(b -> circuitBreakerManager.isRequestPermitted(b.getUrl()))
                 .toList();
@@ -171,7 +246,6 @@ public class ReverseProxyController {
             }
         }
 
-        // 3. Forward request with automatic in-flight failover protection
         ProxyResponse proxyResponse;
         BackendServer activeBackend = backend;
         int failoverAttempts = 0;
@@ -220,61 +294,24 @@ public class ReverseProxyController {
             circuitBreakerManager.recordSuccess(activeBackend.getUrl());
         }
 
-        // 4. Determine cache status & handle store or invalidation
-        String cacheStatus;
-        if (isCacheableMethod) {
-            if (cacheBypassRequested || !responseCacheService.isEnabled()) {
-                cacheStatus = "BYPASS";
-            } else {
-                cacheStatus = "MISS";
-                if (proxyResponse.getStatusCode() >= 200 && proxyResponse.getStatusCode() < 300) {
-                    responseCacheService.put(
-                            cacheKey,
-                            proxyResponse.getStatusCode(),
-                            proxyResponse.getHeaders(),
-                            proxyResponse.getBody(),
-                            activeBackend.getUrl()
-                    );
-                }
-            }
-        } else {
-            // State-mutating request (POST, PUT, DELETE, PATCH): Invalidate affected cache keys
-            responseCacheService.invalidatePath(uri);
-            cacheStatus = "BYPASS";
+        // Cache successful idempotent responses
+        if (isCacheableMethod && responseCacheService.isEnabled()
+                && proxyResponse.getStatusCode() >= 200 && proxyResponse.getStatusCode() < 300) {
+            responseCacheService.put(
+                    cacheKey,
+                    proxyResponse.getStatusCode(),
+                    proxyResponse.getHeaders(),
+                    proxyResponse.getBody(),
+                    activeBackend.getUrl()
+            );
         }
 
-        String routeLabel = activeBackend.getUrl();
-        if (failoverAttempts > 0) {
-            routeLabel += " (Failover from " + failoverOrigin + ")";
-        }
-
-        trafficMetricsService.record(
-                clientIp,
-                method,
-                uri,
-                routeLabel,
-                proxyResponse.getStatusCode(),
-                proxyResponse.getLatencyMs(),
-                false,
-                cacheStatus
+        return new RequestCoalescingService.CoalescedExecutionResult(
+                proxyResponse,
+                activeBackend.getUrl(),
+                failoverAttempts,
+                failoverOrigin
         );
-
-        HttpHeaders responseHeaders = new HttpHeaders();
-        responseHeaders.addAll(proxyResponse.getHeaders());
-        responseHeaders.set("X-Cache", cacheStatus);
-        responseHeaders.set("X-RateLimit-Limit", String.valueOf(rateLimitResult.getCapacity()));
-        responseHeaders.set("X-RateLimit-Remaining", String.valueOf(rateLimitResult.getRemainingTokens()));
-        responseHeaders.set("X-Circuit-Breaker", circuitBreakerManager.getCircuitBreaker(activeBackend.getUrl()).getState().name());
-        responseHeaders.set("X-Failover-Attempts", String.valueOf(failoverAttempts));
-        if (failoverOrigin != null) {
-            responseHeaders.set("X-Failover-Origin", failoverOrigin);
-            responseHeaders.set("X-Failover-Target", activeBackend.getUrl());
-        }
-
-        return ResponseEntity
-                .status(proxyResponse.getStatusCode())
-                .headers(responseHeaders)
-                .body(proxyResponse.getBody());
     }
 
     private Optional<BackendServer> selectFailoverBackend(BackendServer failedBackend) {

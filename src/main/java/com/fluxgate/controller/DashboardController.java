@@ -4,6 +4,7 @@ import com.fluxgate.model.BackendServer;
 import com.fluxgate.resilience.CircuitBreakerManager;
 import com.fluxgate.service.BackendRegistry;
 import com.fluxgate.service.RateLimiterService;
+import com.fluxgate.service.RequestCoalescingService;
 import com.fluxgate.service.ResponseCacheService;
 import com.fluxgate.service.TrafficMetricsService;
 import com.fluxgate.strategy.LoadBalancingStrategyManager;
@@ -29,19 +30,22 @@ public class DashboardController {
     private final ResponseCacheService responseCacheService;
     private final TrafficMetricsService trafficMetricsService;
     private final CircuitBreakerManager circuitBreakerManager;
+    private final RequestCoalescingService requestCoalescingService;
 
     public DashboardController(BackendRegistry backendRegistry,
                                LoadBalancingStrategyManager strategyManager,
                                RateLimiterService rateLimiterService,
                                ResponseCacheService responseCacheService,
                                TrafficMetricsService trafficMetricsService,
-                               CircuitBreakerManager circuitBreakerManager) {
+                               CircuitBreakerManager circuitBreakerManager,
+                               RequestCoalescingService requestCoalescingService) {
         this.backendRegistry = backendRegistry;
         this.strategyManager = strategyManager;
         this.rateLimiterService = rateLimiterService;
         this.responseCacheService = responseCacheService;
         this.trafficMetricsService = trafficMetricsService;
         this.circuitBreakerManager = circuitBreakerManager;
+        this.requestCoalescingService = requestCoalescingService;
     }
 
     @GetMapping(value = {"/", "/dashboard"}, produces = MediaType.TEXT_HTML_VALUE)
@@ -65,6 +69,8 @@ public class DashboardController {
         response.put("totalBackends", all.size());
         response.put("rateLimiterEnabled", rateLimiterService.isEnabled());
         response.put("edgeCacheEnabled", responseCacheService.isEnabled());
+        response.put("coalescingEnabled", requestCoalescingService.isEnabled());
+        response.put("coalescing", requestCoalescingService.getStats());
         response.put("circuitBreakers", circuitBreakerManager.getTelemetry());
         response.put("dashboardUrl", "/dashboard");
         response.put("testEndpoint", "/hello");
@@ -75,6 +81,7 @@ public class DashboardController {
                 "strategy", "/fluxgate/strategy",
                 "rateLimit", "/fluxgate/rate-limit",
                 "cache", "/fluxgate/cache",
+                "coalescing", "/fluxgate/coalescing",
                 "metrics", "/fluxgate/metrics",
                 "backends", "/fluxgate/backends",
                 "healthCheck", "/fluxgate/health-check"
@@ -499,6 +506,18 @@ public class DashboardController {
       align-items: center;
       gap: 4px;
     }
+    .cache-pill-coalesced {
+      background: rgba(139, 92, 246, 0.25);
+      color: #c084fc;
+      border: 1px solid rgba(139, 92, 246, 0.5);
+      padding: 2px 8px;
+      border-radius: 6px;
+      font-weight: 700;
+      font-size: 11px;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+    }
     .cache-pill-miss {
       background: rgba(148, 163, 184, 0.15);
       color: #94a3b8;
@@ -646,6 +665,11 @@ public class DashboardController {
         <div class="stat-value" id="circuitBreakerStat" style="color: #10b981;">0 OPEN</div>
         <div class="stat-sub" id="failoverStatSub">0 in-flight failovers</div>
       </div>
+      <div class="stat-card">
+        <div class="stat-label">🚀 SingleFlight Coalescing</div>
+        <div class="stat-value" id="coalesceStat" style="color: #a78bfa;">0 Saved</div>
+        <div class="stat-sub" id="coalesceSub">Thundering herd shield</div>
+      </div>
     </div>
 
     <!-- Strategy Switcher -->
@@ -665,6 +689,9 @@ public class DashboardController {
         </button>
         <button class="strategy-btn" onclick="setStrategy('RANDOM')">
           🎲 Random
+        </button>
+        <button class="strategy-btn" onclick="setStrategy('WEIGHTED_ROUND_ROBIN')">
+          ⚖️ Smooth Weighted
         </button>
       </div>
     </div>
@@ -870,6 +897,9 @@ public class DashboardController {
         <button class="btn btn-secondary" style="border-color: #f59e0b; color: #fbbf24; background: rgba(245, 158, 11, 0.15);" onclick="testCircuitFailover()">
           💥 Test Circuit Trip & Failover
         </button>
+        <button class="btn btn-secondary" style="border-color: #8b5cf6; color: #c084fc; background: rgba(139, 92, 246, 0.15);" onclick="testSingleFlightStampede()">
+          🚀 Test SingleFlight Stampede
+        </button>
         <button class="btn btn-secondary" onclick="sendBatchRequests(10)">🚀 Send 10 Requests</button>
         <button class="btn btn-secondary" style="background: rgba(239, 68, 68, 0.2); border-color: rgba(239, 68, 68, 0.4);" onclick="sendSpamRequests(25)">
           💥 Spam 25 (Test Rate Limiter)
@@ -1012,6 +1042,17 @@ public class DashboardController {
         toggleCircuitBtn.style.color = isCbEnabled ? '#34d399' : '#f87171';
       }
 
+      // SingleFlight Coalescing Telemetry
+      const coal = data.coalescing || {};
+      const coalesceStat = document.getElementById('coalesceStat');
+      if (coalesceStat) {
+        coalesceStat.textContent = (coal.upstreamCallsSaved || 0) + ' Saved';
+      }
+      const coalesceSub = document.getElementById('coalesceSub');
+      if (coalesceSub) {
+        coalesceSub.textContent = `${coal.totalCoalescedRequests || 0} coalesced • ${coal.efficiencyRatioPercent || 0}% ratio`;
+      }
+
       // Render Circuit Breakers Table
       const cbBackends = cb.backends || {};
       const cbTableBody = document.getElementById('circuitBreakersTableBody');
@@ -1124,6 +1165,8 @@ public class DashboardController {
         let cacheBadge = '<span class="cache-pill-miss">MISS</span>';
         if (r.cacheStatus === 'HIT') {
           cacheBadge = '<span class="cache-pill-hit"><span class="pulse-dot"></span> HIT (0ms)</span>';
+        } else if (r.cacheStatus === 'COALESCED') {
+          cacheBadge = '<span class="cache-pill-coalesced">⚡ COALESCED</span>';
         } else if (r.cacheStatus === 'BYPASS') {
           cacheBadge = '<span class="cache-pill-bypass">BYPASS</span>';
         } else if (r.cacheStatus === 'THROTTLED') {
@@ -1357,6 +1400,42 @@ public class DashboardController {
       const proxyLat2 = res2.headers.get('X-Proxy-Latency') || '0ms (Edge Cache)';
       consoleBox.textContent += `    HTTP ${res2.status} | Cache: ⚡ ${cache2} (Sub-ms) | Latency: ${lat2}ms (Internal: ${proxyLat2})\\n\\n`;
       consoleBox.textContent += `✨ Result: Edge Cache eliminated upstream backend round-trip overhead! Speedup verified.`;
+
+      fetchStatus();
+      fetchMetrics();
+    }
+
+    async function testSingleFlightStampede() {
+      const consoleBox = document.getElementById('testOutput');
+      consoleBox.textContent = `[SINGLEFLIGHT COALESCING DRILL] Simulating concurrent Thundering Herd (Cache Stampede)...\\n\\n`;
+      consoleBox.textContent += `==> Firing 6 concurrent requests to uncached route at the exact same millisecond...\\n`;
+
+      const stampedePath = '/hello?stampede=' + Date.now();
+      const t0 = performance.now();
+
+      try {
+        const requests = Array.from({ length: 6 }, (_, i) => 
+          fetch(stampedePath, { headers: { 'Cache-Control': 'no-cache' } })
+            .then(async res => {
+              const lat = Math.round(performance.now() - t0);
+              const coalesced = res.headers.get('X-Coalesced') === 'true';
+              const waiters = res.headers.get('X-Coalesced-Waiters') || '0';
+              const backend = res.headers.get('X-Upstream-Backend') || '-';
+              return { index: i + 1, status: res.status, coalesced, waiters, backend, lat };
+            })
+        );
+
+        const results = await Promise.all(requests);
+        results.forEach(r => {
+          const coalBadge = r.coalesced ? '⚡ COALESCED (SingleFlight Hitchhiker)' : '🚀 INITIATOR (Primary Upstream Request)';
+          consoleBox.textContent += `    Request #${r.index}: HTTP ${r.status} | ${coalBadge} | Waiters: ${r.waiters} | ${r.lat}ms\\n`;
+        });
+
+        const coalescedCount = results.filter(r => r.coalesced).length;
+        consoleBox.textContent += `\\n✨ Result: SingleFlight coalesced ${coalescedCount} of 6 concurrent requests into ONE upstream call! Upstream load reduced by ${(coalescedCount / 6 * 100).toFixed(1)}%.`;
+      } catch (err) {
+        consoleBox.textContent += `\\n❌ Drill error: ${err.message}`;
+      }
 
       fetchStatus();
       fetchMetrics();

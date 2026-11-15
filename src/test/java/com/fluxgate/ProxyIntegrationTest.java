@@ -46,6 +46,9 @@ class ProxyIntegrationTest {
     @Autowired
     private com.fluxgate.resilience.CircuitBreakerManager circuitBreakerManager;
 
+    @Autowired
+    private com.fluxgate.service.RequestCoalescingService requestCoalescingService;
+
     private static HttpServer server1;
     private static HttpServer server2;
     private static HttpServer server3;
@@ -271,5 +274,22 @@ class ProxyIntegrationTest {
         assertEquals(1, (int) cbResp.getBody().get("openCircuits"));
 
         circuitBreakerManager.resetAll();
+    }
+
+    @Test
+    @DisplayName("Should populate X-Coalesced and X-Coalesced-Waiters headers on proxied requests")
+    void testSingleFlightHeadersAndEndpoint() {
+        requestCoalescingService.setEnabled(true);
+
+        ResponseEntity<String> response = restTemplate.getForEntity(getBaseUrl() + "/api/echo?stampedeProbe=1", String.class);
+        assertEquals(HttpStatus.OK, response.getStatusCode());
+        assertNotNull(response.getHeaders().getFirst("X-Coalesced"));
+        assertNotNull(response.getHeaders().getFirst("X-Coalesced-Waiters"));
+
+        // Verify /fluxgate/coalescing endpoint
+        ResponseEntity<Map> coalResp = restTemplate.getForEntity(getBaseUrl() + "/fluxgate/coalescing", Map.class);
+        assertEquals(HttpStatus.OK, coalResp.getStatusCode());
+        assertEquals(true, coalResp.getBody().get("enabled"));
+        assertTrue((Integer) coalResp.getBody().get("totalInitiatedRequests") >= 1);
     }
 }

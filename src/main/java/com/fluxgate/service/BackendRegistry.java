@@ -38,21 +38,42 @@ public class BackendRegistry {
     }
 
     /**
-     * Registers a new backend URL if not already present.
+     * Registers a new backend URL if not already present, with default weight 1.
      */
     public synchronized BackendServer registerBackend(String rawUrl) {
+        return registerBackend(rawUrl, 1);
+    }
+
+    /**
+     * Registers a new backend URL with configured weight if not already present.
+     */
+    public synchronized BackendServer registerBackend(String rawUrl, int weight) {
         if (rawUrl == null || rawUrl.isBlank()) {
             throw new IllegalArgumentException("Backend URL cannot be blank");
         }
-        BackendServer newServer = new BackendServer(rawUrl);
+        BackendServer newServer = new BackendServer(rawUrl, true, weight);
         for (BackendServer existing : backends) {
             if (existing.getUrl().equalsIgnoreCase(newServer.getUrl())) {
+                existing.setWeight(weight);
                 return existing;
             }
         }
         backends.add(newServer);
-        log.info("Registered new backend: {}", newServer.getUrl());
+        log.info("Registered new backend: {} (weight={})", newServer.getUrl(), newServer.getWeight());
         return newServer;
+    }
+
+    /**
+     * Updates the weight of an existing registered backend.
+     */
+    public synchronized boolean setBackendWeight(String rawUrl, int weight) {
+        Optional<BackendServer> opt = findByUrl(rawUrl);
+        if (opt.isPresent()) {
+            opt.get().setWeight(weight);
+            log.info("Updated weight for backend {} to {}", rawUrl, weight);
+            return true;
+        }
+        return false;
     }
 
     /**

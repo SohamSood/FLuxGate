@@ -17,7 +17,7 @@
 
 **FluxGate** is an enterprise-grade, high-performance reverse proxy and load balancing system built with **Spring Boot 3** and **Java 21**. It functions as a unified ingress gateway that dynamically routes, balances, and monitors traffic across distributed backend microservices.
 
-Featuring an **interactive Web Dashboard**, **Enterprise Dynamic Circuit Breaker & Automatic In-Flight Failover** (state machine: CLOSED &rarr; OPEN &rarr; HALF_OPEN, zero-downtime traffic rerouting, and chaos drills), **High-Speed Edge Response Cache & Accelerator** (sub-millisecond hits, RFC 7234 semantics, and auto-invalidation), **Traffic Guardian Adaptive Rate Limiter** (token-bucket per IP), **real-time Ingress Stream observability**, **dynamic algorithm switching** (Round Robin, Least Connections, Random), **automated health monitoring**, **embedded demo backend servers**, and **runtime backend registration**.
+Featuring an **interactive Web Dashboard**, **SingleFlight Ingress Request Coalescing & Thundering Herd Protection** (concurrency deduplication slashing upstream load by up to 99%), **Enterprise Dynamic Circuit Breaker & Automatic In-Flight Failover** (state machine: CLOSED &rarr; OPEN &rarr; HALF_OPEN, zero-downtime traffic rerouting, and chaos drills), **High-Speed Edge Response Cache & Accelerator** (sub-millisecond hits, RFC 7234 semantics, and auto-invalidation), **Traffic Guardian Adaptive Rate Limiter** (token-bucket per IP), **real-time Ingress Stream observability**, **dynamic algorithm switching** (Smooth Weighted Round Robin, Round Robin, Least Connections, Random), **Java 21 Virtual Threads High-Concurrency Scaling**, **automated health monitoring**, **embedded demo backend servers**, and **runtime backend registration**.
 
 ---
 
@@ -32,12 +32,13 @@ FluxGate is actively deployed on **Render**:
 | **Self-Health Probe** | `GET` | [`/fluxgate/health`](https://fluxgate-bvjt.onrender.com/fluxgate/health) | Orchestrator health check (Render / K8s / ECS) |
 | **Circuit Breakers API** | `GET`/`POST` | [`/fluxgate/circuit-breakers`](https://fluxgate-bvjt.onrender.com/fluxgate/circuit-breakers) | Inspect state (CLOSED/OPEN/HALF_OPEN), trip backend for chaos drill, or reset circuits |
 | **Edge Cache API** | `GET`/`POST`/`DELETE` | [`/fluxgate/cache`](https://fluxgate-bvjt.onrender.com/fluxgate/cache) | Inspect hit ratio & cached routes, dynamically update TTL/max entries, or purge cache entries |
+| **Request Coalescing API** | `GET`/`POST` | [`/fluxgate/coalescing`](https://fluxgate-bvjt.onrender.com/fluxgate/coalescing) | Inspect SingleFlight deduplication stats, upstream calls saved, efficiency ratio & configure timeouts |
 | **Rate Limiter Policy** | `GET`/`POST` | [`/fluxgate/rate-limit`](https://fluxgate-bvjt.onrender.com/fluxgate/rate-limit) | Inspect or dynamically reconfigure token-bucket capacity and refill rate |
 | **Traffic Stream & Metrics** | `GET`/`DELETE` | [`/fluxgate/metrics`](https://fluxgate-bvjt.onrender.com/fluxgate/metrics) | Real-time stream of recent transactions, cache hit badges, status code breakdowns, and latency metrics |
-| **Strategy Control** | `GET`/`POST` | [`/fluxgate/strategy`](https://fluxgate-bvjt.onrender.com/fluxgate/strategy) | View or update active load balancing strategy dynamically |
+| **Strategy Control** | `GET`/`POST` | [`/fluxgate/strategy`](https://fluxgate-bvjt.onrender.com/fluxgate/strategy) | View or update active load balancing strategy dynamically (Round Robin, Weighted, Least Conn, Random) |
 | **Manual Probe** | `POST` | `/fluxgate/health-check` | Triggers an immediate health probe across all registered backends |
-| **Dynamic Backends** | `POST`/`DELETE` | `/fluxgate/backends` | Add or remove backend instances at runtime |
-| **Reverse Proxy Route** | `ANY` | [`/hello`](https://fluxgate-bvjt.onrender.com/hello) | Transparently balanced, cached, circuit-protected & rate-limited reverse proxy route |
+| **Dynamic Backends & Weights** | `POST`/`DELETE` | `/fluxgate/backends` | Add, remove, or update backend instance weights dynamically at runtime |
+| **Reverse Proxy Route** | `ANY` | [`/hello`](https://fluxgate-bvjt.onrender.com/hello) | Transparently balanced, cached, coalesced, circuit-protected & rate-limited reverse proxy route |
 
 ---
 
@@ -66,11 +67,14 @@ Clients  ────────▶ [ FluxGate:8080 ] ────────�
 2. **Interactive UI**: Visiting `/` in a browser renders the live dark-mode dashboard with cluster cards, instant strategy switcher, and traffic simulator.
 3. **Multi-Strategy Routing**: Pluggable strategies orchestrated by `LoadBalancingStrategyManager`:
    - 🔄 **Round Robin**: Thread-safe sequential rotation across healthy instances.
-   - ⚖️ **Least Connections**: Dispatches to the node with fewest active in-flight requests.
+   - ⚖️ **Smooth Weighted Round Robin**: NGINX-style proportional distribution across heterogeneous nodes without burstiness.
+   - 📊 **Least Connections**: Dispatches to the node with fewest active in-flight requests.
    - 🎲 **Random**: Uniform stochastic distribution across healthy nodes.
-4. **Transparent Proxying**: Forwards the exact HTTP method, path, query parameters, headers, and request bodies, injecting `X-Forwarded-For`, `X-Proxy-By: FluxGate`, and `X-Upstream-Backend`.
-5. **Fault-Tolerant Health Monitoring**: Periodically tests `/health` on all registered backends every 10 seconds; isolates failing nodes automatically and recovers them when they come back up.
-6. **Zero-Config Embedded Cluster**: Includes lightweight embedded backend workers using Java 21's virtual-thread HTTP server, making FluxGate immediately functional with 3 healthy backends out-of-the-box upon deployment.
+4. **SingleFlight Request Coalescing**: Collapses concurrent duplicate read requests during high traffic surges into a single upstream request, sharing the result to eliminate cache stampedes and protect backends.
+5. **Java 21 Virtual Threads**: Built-in support for lightweight fibers, delivering extreme concurrency scalability without thread pool exhaustion.
+6. **Transparent Proxying**: Forwards the exact HTTP method, path, query parameters, headers, and request bodies, injecting `X-Forwarded-For`, `X-Proxy-By: FluxGate`, `X-Coalesced`, and `X-Upstream-Backend`.
+7. **Fault-Tolerant Health Monitoring**: Periodically tests `/health` on all registered backends every 10 seconds; isolates failing nodes automatically and recovers them when they come back up.
+8. **Zero-Config Embedded Cluster**: Includes lightweight embedded backend workers using Java 21's virtual-thread HTTP server, making FluxGate immediately functional with 3 healthy backends out-of-the-box upon deployment.
 
 ---
 
@@ -83,7 +87,7 @@ Clients  ────────▶ [ FluxGate:8080 ] ────────�
 git clone https://github.com/SohamSood/FLuxGate.git
 cd FLuxGate
 
-# Run all tests (40 passing unit & integration tests)
+# Run all tests (50 passing unit & integration tests)
 ./mvnw clean test
 
 # Run application locally on port 8080

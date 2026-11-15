@@ -7,6 +7,7 @@ import org.springframework.scheduling.annotation.EnableScheduling;
 
 import java.net.http.HttpClient;
 import java.time.Duration;
+import java.util.concurrent.Executors;
 
 @Configuration
 @EnableScheduling
@@ -16,6 +17,7 @@ public class AppConfig {
     @Bean
     public HttpClient httpClient(FluxGateProperties properties) {
         return HttpClient.newBuilder()
+                .executor(Executors.newVirtualThreadPerTaskExecutor())
                 .connectTimeout(Duration.ofMillis(properties.getProxy().getConnectTimeoutMs()))
                 .followRedirects(HttpClient.Redirect.NORMAL)
                 .build();

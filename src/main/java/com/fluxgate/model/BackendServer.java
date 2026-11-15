@@ -16,14 +16,19 @@ public class BackendServer {
     private final AtomicInteger consecutiveSuccesses;
     private final AtomicLong totalRequests;
     private final AtomicLong activeRequests;
+    private final AtomicInteger weight;
     private volatile long lastCheckedAt;
     private volatile String lastFailureReason;
 
     public BackendServer(String url) {
-        this(url, true);
+        this(url, true, 1);
     }
 
     public BackendServer(String url, boolean initialHealthy) {
+        this(url, initialHealthy, 1);
+    }
+
+    public BackendServer(String url, boolean initialHealthy, int weight) {
         // Strip trailing slash for consistent URI joining
         this.url = sanitizeUrl(url);
         this.healthy = new AtomicBoolean(initialHealthy);
@@ -31,6 +36,7 @@ public class BackendServer {
         this.consecutiveSuccesses = new AtomicInteger(0);
         this.totalRequests = new AtomicLong(0);
         this.activeRequests = new AtomicLong(0);
+        this.weight = new AtomicInteger(Math.max(1, weight));
         this.lastCheckedAt = System.currentTimeMillis();
     }
 
@@ -100,6 +106,14 @@ public class BackendServer {
         return lastFailureReason;
     }
 
+    public int getWeight() {
+        return weight.get();
+    }
+
+    public void setWeight(int newWeight) {
+        this.weight.set(Math.max(1, newWeight));
+    }
+
     @Override
     public boolean equals(Object o) {
         if (this == o) return true;
@@ -118,6 +132,7 @@ public class BackendServer {
         return "BackendServer{" +
                 "url='" + url + '\'' +
                 ", healthy=" + healthy.get() +
+                ", weight=" + weight.get() +
                 ", totalRequests=" + totalRequests.get() +
                 '}';
     }

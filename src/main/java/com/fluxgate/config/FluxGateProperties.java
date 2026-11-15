@@ -26,6 +26,7 @@ public class FluxGateProperties {
     private RateLimit rateLimit = new RateLimit();
     private Cache cache = new Cache();
     private CircuitBreaker circuitBreaker = new CircuitBreaker();
+    private Coalescing coalescing = new Coalescing();
 
     public List<String> getBackends() {
         return backends;
@@ -81,6 +82,14 @@ public class FluxGateProperties {
 
     public void setCircuitBreaker(CircuitBreaker circuitBreaker) {
         this.circuitBreaker = circuitBreaker;
+    }
+
+    public Coalescing getCoalescing() {
+        return coalescing;
+    }
+
+    public void setCoalescing(Coalescing coalescing) {
+        this.coalescing = coalescing;
     }
 
     public static class DemoBackends {
@@ -251,6 +260,27 @@ public class FluxGateProperties {
 
         public void setHalfOpenTrialRequests(int halfOpenTrialRequests) {
             this.halfOpenTrialRequests = halfOpenTrialRequests;
+        }
+    }
+
+    public static class Coalescing {
+        private boolean enabled = true;
+        private long timeoutMs = 10000;
+
+        public boolean isEnabled() {
+            return enabled;
+        }
+
+        public void setEnabled(boolean enabled) {
+            this.enabled = enabled;
+        }
+
+        public long getTimeoutMs() {
+            return timeoutMs;
+        }
+
+        public void setTimeoutMs(long timeoutMs) {
+            this.timeoutMs = timeoutMs;
         }
     }
 }
