@@ -3,6 +3,7 @@ package com.fluxgate.service;
 import com.fluxgate.config.FluxGateProperties;
 import com.fluxgate.model.BackendServer;
 import com.fluxgate.model.ProxyResponse;
+import com.fluxgate.util.ProxyHeaderUtils;
 import jakarta.servlet.http.HttpServletRequest;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -16,10 +17,6 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.net.http.HttpTimeoutException;
 import java.time.Duration;
-import java.util.Enumeration;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
 
 /**
  * Executes transparent HTTP request forwarding to an upstream backend and returns the response.
@@ -28,21 +25,6 @@ import java.util.Set;
 public class ProxyService {
 
     private static final Logger log = LoggerFactory.getLogger(ProxyService.class);
-
-    // Hop-by-hop headers that must not be forwarded by a proxy (RFC 7230 §6.1)
-    private static final Set<String> HOP_BY_HOP_HEADERS = Set.of(
-            "connection",
-            "keep-alive",
-            "proxy-authenticate",
-            "proxy-authorization",
-            "te",
-            "trailer",
-            "trailers",
-            "transfer-encoding",
-            "upgrade",
-            "host",
-            "content-length"
-    );
 
     private final HttpClient httpClient;
     private final FluxGateProperties properties;
@@ -60,7 +42,7 @@ public class ProxyService {
         String requestUri = request.getRequestURI();
         String queryString = request.getQueryString();
 
-        String targetUrl = backend.getUrl() + requestUri + (queryString != null && !queryString.isBlank() ? "?" + queryString : "");
+        String targetUrl = ProxyHeaderUtils.buildTargetUrl(backend.getUrl(), requestUri, queryString);
         long startTime = System.currentTimeMillis();
 
         backend.incrementRequests();
@@ -70,10 +52,10 @@ public class ProxyService {
                     .uri(URI.create(targetUrl))
                     .timeout(Duration.ofMillis(properties.getProxy().getReadTimeoutMs()));
 
-            // Copy allowed headers
-            copyHeaders(request, requestBuilder, backend);
+            // Copy allowed headers and inject standard X-Forwarded-* headers
+            ProxyHeaderUtils.copyRequestHeaders(request, requestBuilder, backend);
 
-            // Set method and body
+            // Set HTTP method and body payload
             setMethodAndBody(requestBuilder, method, body);
 
             HttpRequest upstreamRequest = requestBuilder.build();
@@ -83,7 +65,7 @@ public class ProxyService {
             int statusCode = upstreamResponse.statusCode();
 
             // Extract response headers and enrich with proxy diagnostic telemetry
-            HttpHeaders responseHeaders = extractResponseHeaders(upstreamResponse.headers().map());
+            HttpHeaders responseHeaders = ProxyHeaderUtils.extractResponseHeaders(upstreamResponse.headers().map());
             responseHeaders.set("X-Proxy-By", "FluxGate");
             responseHeaders.set("X-Upstream-Backend", backend.getUrl());
             responseHeaders.set("X-Proxy-Latency", latencyMs + "ms");
@@ -124,47 +106,6 @@ public class ProxyService {
         }
     }
 
-    private void copyHeaders(HttpServletRequest request, HttpRequest.Builder builder, BackendServer backend) {
-        Enumeration<String> headerNames = request.getHeaderNames();
-        if (headerNames != null) {
-            while (headerNames.hasMoreElements()) {
-                String headerName = headerNames.nextElement();
-                if (headerName == null) continue;
-
-                String lower = headerName.toLowerCase();
-                if (HOP_BY_HOP_HEADERS.contains(lower)) {
-                    continue;
-                }
-
-                Enumeration<String> values = request.getHeaders(headerName);
-                if (values != null) {
-                    while (values.hasMoreElements()) {
-                        String value = values.nextElement();
-                        if (value != null) {
-                            try {
-                                builder.header(headerName, value);
-                            } catch (IllegalArgumentException ignored) {
-                                // Ignore restricted or malformed headers
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Add standard X-Forwarded-* headers
-        String clientIp = request.getHeader("X-Forwarded-For");
-        if (clientIp == null || clientIp.isBlank()) {
-            clientIp = request.getRemoteAddr();
-        } else {
-            clientIp = clientIp + ", " + request.getRemoteAddr();
-        }
-        builder.header("X-Forwarded-For", clientIp);
-        builder.header("X-Forwarded-Proto", request.getScheme());
-        builder.header("X-Forwarded-Host", request.getHeader("Host") != null ? request.getHeader("Host") : request.getServerName());
-        builder.header("X-Forwarded-Port", String.valueOf(request.getServerPort()));
-    }
-
     private void setMethodAndBody(HttpRequest.Builder builder, String method, byte[] body) {
         HttpRequest.BodyPublisher publisher;
         if (body != null && body.length > 0) {
@@ -174,23 +115,5 @@ public class ProxyService {
         }
 
         builder.method(method.toUpperCase(), publisher);
-    }
-
-    private HttpHeaders extractResponseHeaders(Map<String, List<String>> upstreamHeaders) {
-        HttpHeaders headers = new HttpHeaders();
-        for (Map.Entry<String, List<String>> entry : upstreamHeaders.entrySet()) {
-            String name = entry.getKey();
-            if (name == null) continue;
-
-            String lower = name.toLowerCase();
-            if (HOP_BY_HOP_HEADERS.contains(lower)) {
-                continue;
-            }
-
-            for (String val : entry.getValue()) {
-                headers.add(name, val);
-            }
-        }
-        return headers;
     }
 }

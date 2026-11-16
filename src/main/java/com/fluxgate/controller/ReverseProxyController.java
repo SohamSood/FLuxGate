@@ -1,70 +1,44 @@
 package com.fluxgate.controller;
 
-import com.fluxgate.model.BackendServer;
 import com.fluxgate.model.CachedResponse;
-import com.fluxgate.model.ProxyResponse;
+import com.fluxgate.model.ProxyPipelineResult;
 import com.fluxgate.model.RateLimitResult;
-import com.fluxgate.resilience.CircuitBreakerManager;
-import com.fluxgate.service.BadGatewayException;
-import com.fluxgate.service.BackendRegistry;
-import com.fluxgate.service.GatewayTimeoutException;
-import com.fluxgate.service.NoHealthyBackendException;
-import com.fluxgate.service.ProxyService;
+import com.fluxgate.service.ProxyExecutionPipeline;
 import com.fluxgate.service.RateLimiterService;
-import com.fluxgate.service.RequestCoalescingService;
 import com.fluxgate.service.ResponseCacheService;
 import com.fluxgate.service.TrafficMetricsService;
-import com.fluxgate.strategy.LoadBalancingStrategy;
+import com.fluxgate.util.ProxyHeaderUtils;
 import jakarta.servlet.http.HttpServletRequest;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
-import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.nio.charset.StandardCharsets;
-import java.util.List;
 import java.util.Optional;
 
 /**
- * Catch-all reverse proxy controller: enforces rate limits, manages edge response caching,
- * routes traffic via load balancing strategies, manages circuit breakers, and executes
- * automatic in-flight failover protection.
+ * Catch-all reverse proxy controller: coordinates incoming requests across rate limiting,
+ * edge response cache, and the modular proxy execution pipeline.
  */
 @RestController
 public class ReverseProxyController {
 
-    private static final Logger log = LoggerFactory.getLogger(ReverseProxyController.class);
-
-    private final BackendRegistry backendRegistry;
-    private final LoadBalancingStrategy loadBalancingStrategy;
-    private final ProxyService proxyService;
     private final RateLimiterService rateLimiterService;
     private final ResponseCacheService responseCacheService;
     private final TrafficMetricsService trafficMetricsService;
-    private final CircuitBreakerManager circuitBreakerManager;
-    private final RequestCoalescingService requestCoalescingService;
+    private final ProxyExecutionPipeline pipeline;
 
-    public ReverseProxyController(BackendRegistry backendRegistry,
-                                  LoadBalancingStrategy loadBalancingStrategy,
-                                  ProxyService proxyService,
-                                  RateLimiterService rateLimiterService,
+    public ReverseProxyController(RateLimiterService rateLimiterService,
                                   ResponseCacheService responseCacheService,
                                   TrafficMetricsService trafficMetricsService,
-                                  CircuitBreakerManager circuitBreakerManager,
-                                  RequestCoalescingService requestCoalescingService) {
-        this.backendRegistry = backendRegistry;
-        this.loadBalancingStrategy = loadBalancingStrategy;
-        this.proxyService = proxyService;
+                                  ProxyExecutionPipeline pipeline) {
         this.rateLimiterService = rateLimiterService;
         this.responseCacheService = responseCacheService;
         this.trafficMetricsService = trafficMetricsService;
-        this.circuitBreakerManager = circuitBreakerManager;
-        this.requestCoalescingService = requestCoalescingService;
+        this.pipeline = pipeline;
     }
 
     @RequestMapping(value = "/**")
@@ -79,268 +53,104 @@ public class ReverseProxyController {
                     .body(DashboardController.DASHBOARD_HTML.getBytes(StandardCharsets.UTF_8));
         }
 
-        String clientIp = extractClientIp(request);
+        String clientIp = ProxyHeaderUtils.extractClientIp(request);
         RateLimitResult rateLimitResult = rateLimiterService.tryConsume(clientIp);
 
         if (!rateLimitResult.isAllowed()) {
-            trafficMetricsService.record(
-                    clientIp,
-                    request.getMethod(),
-                    uri,
-                    "RATE_LIMITED",
-                    HttpStatus.TOO_MANY_REQUESTS.value(),
-                    0,
-                    true,
-                    "THROTTLED"
-            );
-
-            HttpHeaders headers = new HttpHeaders();
-            headers.setContentType(MediaType.APPLICATION_JSON);
-            headers.set("Retry-After", String.valueOf(rateLimitResult.getResetSeconds()));
-            headers.set("X-RateLimit-Limit", String.valueOf(rateLimitResult.getCapacity()));
-            headers.set("X-RateLimit-Remaining", "0");
-            headers.set("X-RateLimit-Reset", String.valueOf(rateLimitResult.getResetSeconds()));
-            headers.set("X-Proxy-By", "FluxGate-RateLimiter");
-
-            String errorJson = String.format(
-                    "{\"error\":\"Too Many Requests\",\"message\":\"Rate limit exceeded. Please throttle requests.\",\"clientIp\":\"%s\",\"limit\":%d,\"retryAfterSeconds\":%d}",
-                    clientIp, rateLimitResult.getCapacity(), rateLimitResult.getResetSeconds()
-            );
-
-            return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS)
-                    .headers(headers)
-                    .body(errorJson.getBytes(StandardCharsets.UTF_8));
+            return handleRateLimitExceeded(request, uri, clientIp, rateLimitResult);
         }
 
         String method = request.getMethod();
         String queryString = request.getQueryString();
-        String cacheKey = method + ":" + uri + (queryString != null && !queryString.isBlank() ? "?" + queryString : "");
+        String cacheKey = ProxyHeaderUtils.buildCacheKey(method, uri, queryString);
         boolean isCacheableMethod = "GET".equalsIgnoreCase(method) || "HEAD".equalsIgnoreCase(method);
-        boolean cacheBypassRequested = isBypassCacheRequested(request);
+        boolean cacheBypassRequested = ProxyHeaderUtils.isBypassCacheRequested(request);
 
         // 1. Edge Cache Lookup for idempotent read requests
         if (isCacheableMethod && !cacheBypassRequested && responseCacheService.isEnabled()) {
             Optional<CachedResponse> cachedOpt = responseCacheService.get(cacheKey);
             if (cachedOpt.isPresent()) {
-                CachedResponse cached = cachedOpt.get();
-                trafficMetricsService.record(
-                        clientIp,
-                        method,
-                        uri,
-                        cached.getOriginBackend() + " (Edge Cache)",
-                        cached.getStatusCode(),
-                        0,
-                        false,
-                        "HIT"
-                );
-
-                HttpHeaders responseHeaders = new HttpHeaders();
-                responseHeaders.addAll(cached.getHeaders());
-                responseHeaders.set("X-Cache", "HIT");
-                responseHeaders.set("Age", String.valueOf(cached.getAgeSeconds()));
-                responseHeaders.set("X-Cache-TTL", String.valueOf(cached.getRemainingTtlSeconds()));
-                responseHeaders.set("X-Proxy-Latency", "0ms (Edge Cache)");
-                responseHeaders.set("X-Upstream-Backend", cached.getOriginBackend());
-                responseHeaders.set("X-RateLimit-Limit", String.valueOf(rateLimitResult.getCapacity()));
-                responseHeaders.set("X-RateLimit-Remaining", String.valueOf(rateLimitResult.getRemainingTokens()));
-                responseHeaders.set("X-Circuit-Breaker", "BYPASS (Edge Cache)");
-                responseHeaders.set("X-Failover-Attempts", "0");
-
-                return ResponseEntity
-                        .status(cached.getStatusCode())
-                        .headers(responseHeaders)
-                        .body(cached.getBody());
+                return handleCacheHit(cachedOpt.get(), clientIp, method, uri, rateLimitResult);
             }
         }
 
-        // 2. Forward request through SingleFlight coalescing (for idempotent reads) or direct dispatch
-        RequestCoalescingService.CoalescedResult coalescedResult;
-        if (isCacheableMethod) {
-            coalescedResult = requestCoalescingService.execute(cacheKey,
-                    () -> executeForwardWithFailover(request, body, cacheKey, true));
-        } else {
-            // State mutation: invalidate cache and dispatch directly without coalescing
-            responseCacheService.invalidatePath(uri);
-            RequestCoalescingService.CoalescedExecutionResult exec =
-                    executeForwardWithFailover(request, body, cacheKey, false);
-            coalescedResult = new RequestCoalescingService.CoalescedResult(
-                    exec.getResponse(), false, 0, exec.getOriginBackend(),
-                    exec.getFailoverAttempts(), exec.getFailoverOrigin()
-            );
-        }
+        // 2. Dispatch through modular execution pipeline (coalescing, circuit breakers, failover)
+        ProxyPipelineResult result = pipeline.dispatch(request, body, cacheKey, isCacheableMethod, cacheBypassRequested);
 
-        ProxyResponse proxyResponse = coalescedResult.getResponse();
-        boolean wasCoalesced = coalescedResult.isCoalesced();
-        int waiterCount = coalescedResult.getWaiterCount();
+        // 3. Record traffic metrics
+        trafficMetricsService.record(
+                clientIp,
+                method,
+                uri,
+                result.getRouteLabel(),
+                result.getResponse().getStatusCode(),
+                result.getResponse().getLatencyMs(),
+                false,
+                result.getCacheStatus()
+        );
 
-        // 3. Determine cache & coalescing status
-        String cacheStatus;
-        if (wasCoalesced) {
-            cacheStatus = "COALESCED";
-        } else if (isCacheableMethod) {
-            cacheStatus = cacheBypassRequested || !responseCacheService.isEnabled() ? "BYPASS" : "MISS";
-        } else {
-            cacheStatus = "BYPASS";
-        }
+        // 4. Enrich and return response
+        HttpHeaders responseHeaders = ProxyHeaderUtils.createProxiedResponseHeaders(
+                result.getResponse(),
+                result.getCacheStatus(),
+                result.isCoalesced(),
+                result.getWaiterCount(),
+                rateLimitResult,
+                result.getCircuitBreakerState(),
+                result.getFailoverAttempts(),
+                result.getFailoverOrigin(),
+                result.getOriginBackend()
+        );
 
-        String routeLabel = coalescedResult.getOriginBackend();
-        if (wasCoalesced) {
-            routeLabel += " (SingleFlight Coalesced)";
-        } else if (coalescedResult.getFailoverAttempts() > 0) {
-            routeLabel += " (Failover from " + coalescedResult.getFailoverOrigin() + ")";
-        }
+        return ResponseEntity
+                .status(result.getResponse().getStatusCode())
+                .headers(responseHeaders)
+                .body(result.getResponse().getBody());
+    }
+
+    private ResponseEntity<byte[]> handleRateLimitExceeded(
+            HttpServletRequest request, String uri, String clientIp, RateLimitResult rateLimitResult) {
+
+        trafficMetricsService.record(
+                clientIp,
+                request.getMethod(),
+                uri,
+                "RATE_LIMITED",
+                HttpStatus.TOO_MANY_REQUESTS.value(),
+                0,
+                true,
+                "THROTTLED"
+        );
+
+        HttpHeaders headers = ProxyHeaderUtils.createRateLimitHeaders(rateLimitResult);
+        String errorJson = String.format(
+                "{\"error\":\"Too Many Requests\",\"message\":\"Rate limit exceeded. Please throttle requests.\",\"clientIp\":\"%s\",\"limit\":%d,\"retryAfterSeconds\":%d}",
+                clientIp, rateLimitResult.getCapacity(), rateLimitResult.getResetSeconds()
+        );
+
+        return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS)
+                .headers(headers)
+                .body(errorJson.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private ResponseEntity<byte[]> handleCacheHit(
+            CachedResponse cached, String clientIp, String method, String uri, RateLimitResult rateLimitResult) {
 
         trafficMetricsService.record(
                 clientIp,
                 method,
                 uri,
-                routeLabel,
-                proxyResponse.getStatusCode(),
-                proxyResponse.getLatencyMs(),
+                cached.getOriginBackend() + " (Edge Cache)",
+                cached.getStatusCode(),
+                0,
                 false,
-                cacheStatus
+                "HIT"
         );
 
-        HttpHeaders responseHeaders = new HttpHeaders();
-        responseHeaders.addAll(proxyResponse.getHeaders());
-        responseHeaders.set("X-Cache", cacheStatus);
-        responseHeaders.set("X-Coalesced", String.valueOf(wasCoalesced));
-        responseHeaders.set("X-Coalesced-Waiters", String.valueOf(waiterCount));
-        responseHeaders.set("X-RateLimit-Limit", String.valueOf(rateLimitResult.getCapacity()));
-        responseHeaders.set("X-RateLimit-Remaining", String.valueOf(rateLimitResult.getRemainingTokens()));
-        responseHeaders.set("X-Circuit-Breaker", circuitBreakerManager.getCircuitBreaker(coalescedResult.getOriginBackend()).getState().name());
-        responseHeaders.set("X-Failover-Attempts", String.valueOf(coalescedResult.getFailoverAttempts()));
-        if (coalescedResult.getFailoverOrigin() != null) {
-            responseHeaders.set("X-Failover-Origin", coalescedResult.getFailoverOrigin());
-            responseHeaders.set("X-Failover-Target", coalescedResult.getOriginBackend());
-        }
-
+        HttpHeaders responseHeaders = ProxyHeaderUtils.createCacheHitHeaders(cached, rateLimitResult);
         return ResponseEntity
-                .status(proxyResponse.getStatusCode())
+                .status(cached.getStatusCode())
                 .headers(responseHeaders)
-                .body(proxyResponse.getBody());
-    }
-
-    private RequestCoalescingService.CoalescedExecutionResult executeForwardWithFailover(
-            HttpServletRequest request, byte[] body, String cacheKey, boolean isCacheableMethod) {
-
-        // Select initial backend with Circuit Breaker filter
-        List<BackendServer> permittedBackends = backendRegistry.getHealthyBackends().stream()
-                .filter(b -> circuitBreakerManager.isRequestPermitted(b.getUrl()))
-                .toList();
-
-        List<BackendServer> selectionPool = !permittedBackends.isEmpty()
-                ? permittedBackends
-                : backendRegistry.getAllBackends();
-
-        BackendServer backend = loadBalancingStrategy.select(selectionPool)
-                .orElseThrow(() -> new NoHealthyBackendException(
-                        "No healthy backend instances available to handle the request: " + request.getRequestURI()));
-
-        // Check if circuit breaker allows request to primary backend
-        if (!circuitBreakerManager.allowRequest(backend.getUrl())) {
-            Optional<BackendServer> alternateOpt = selectFailoverBackend(backend);
-            if (alternateOpt.isPresent()) {
-                backend = alternateOpt.get();
-                circuitBreakerManager.allowRequest(backend.getUrl());
-            }
-        }
-
-        ProxyResponse proxyResponse;
-        BackendServer activeBackend = backend;
-        int failoverAttempts = 0;
-        String failoverOrigin = null;
-
-        try {
-            proxyResponse = proxyService.forward(request, body, activeBackend);
-
-            // If upstream returns 5xx error, record failure in circuit breaker and attempt transparent in-flight failover
-            if (proxyResponse.getStatusCode() >= 500) {
-                String failureReason = "HTTP " + proxyResponse.getStatusCode() + " upstream error";
-                circuitBreakerManager.recordFailure(activeBackend.getUrl(), failureReason);
-
-                Optional<BackendServer> failoverOpt = selectFailoverBackend(activeBackend);
-                if (failoverOpt.isPresent()) {
-                    BackendServer alternate = failoverOpt.get();
-                    failoverOrigin = activeBackend.getUrl();
-                    activeBackend = alternate;
-                    failoverAttempts++;
-                    circuitBreakerManager.recordFailover(failoverOrigin);
-                    log.warn("[IN-FLIGHT FAILOVER] Backend {} returned 5xx. Transparently rerouting request to alternate backend {}",
-                            failoverOrigin, activeBackend.getUrl());
-                    proxyResponse = proxyService.forward(request, body, activeBackend);
-                }
-            }
-        } catch (BadGatewayException | GatewayTimeoutException ex) {
-            String failureReason = ex.getMessage();
-            circuitBreakerManager.recordFailure(activeBackend.getUrl(), failureReason);
-
-            Optional<BackendServer> failoverOpt = selectFailoverBackend(activeBackend);
-            if (failoverOpt.isPresent()) {
-                BackendServer alternate = failoverOpt.get();
-                failoverOrigin = activeBackend.getUrl();
-                activeBackend = alternate;
-                failoverAttempts++;
-                circuitBreakerManager.recordFailover(failoverOrigin);
-                log.warn("[IN-FLIGHT FAILOVER] Backend {} failed ({}). Transparently rerouting request to alternate backend {}",
-                        failoverOrigin, failureReason, activeBackend.getUrl());
-                proxyResponse = proxyService.forward(request, body, activeBackend);
-            } else {
-                throw ex;
-            }
-        }
-
-        if (proxyResponse.getStatusCode() < 500) {
-            circuitBreakerManager.recordSuccess(activeBackend.getUrl());
-        }
-
-        // Cache successful idempotent responses
-        if (isCacheableMethod && responseCacheService.isEnabled()
-                && proxyResponse.getStatusCode() >= 200 && proxyResponse.getStatusCode() < 300) {
-            responseCacheService.put(
-                    cacheKey,
-                    proxyResponse.getStatusCode(),
-                    proxyResponse.getHeaders(),
-                    proxyResponse.getBody(),
-                    activeBackend.getUrl()
-            );
-        }
-
-        return new RequestCoalescingService.CoalescedExecutionResult(
-                proxyResponse,
-                activeBackend.getUrl(),
-                failoverAttempts,
-                failoverOrigin
-        );
-    }
-
-    private Optional<BackendServer> selectFailoverBackend(BackendServer failedBackend) {
-        List<BackendServer> candidates = backendRegistry.getHealthyBackends().stream()
-                .filter(b -> !b.getUrl().equalsIgnoreCase(failedBackend.getUrl()))
-                .filter(b -> circuitBreakerManager.isRequestPermitted(b.getUrl()))
-                .toList();
-        if (!candidates.isEmpty()) {
-            return loadBalancingStrategy.select(candidates);
-        }
-        return Optional.empty();
-    }
-
-    private boolean isBypassCacheRequested(HttpServletRequest request) {
-        String cacheControl = request.getHeader("Cache-Control");
-        String pragma = request.getHeader("Pragma");
-        return (cacheControl != null && (cacheControl.contains("no-cache") || cacheControl.contains("no-store")))
-                || "no-cache".equalsIgnoreCase(pragma);
-    }
-
-    private String extractClientIp(HttpServletRequest request) {
-        String xForwardedFor = request.getHeader("X-Forwarded-For");
-        if (xForwardedFor != null && !xForwardedFor.isBlank()) {
-            return xForwardedFor.split(",")[0].trim();
-        }
-        String realIp = request.getHeader("X-Real-IP");
-        if (realIp != null && !realIp.isBlank()) {
-            return realIp.trim();
-        }
-        return request.getRemoteAddr() != null ? request.getRemoteAddr() : "127.0.0.1";
+                .body(cached.getBody());
     }
 }
