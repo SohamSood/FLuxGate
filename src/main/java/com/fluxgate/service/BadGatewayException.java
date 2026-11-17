@@ -6,6 +6,10 @@ package com.fluxgate.service;
 public class BadGatewayException extends RuntimeException {
     private final String backendUrl;
 
+    public BadGatewayException(String message, String backendUrl) {
+        this(message, backendUrl, null);
+    }
+
     public BadGatewayException(String message, String backendUrl, Throwable cause) {
         super(message, cause);
         this.backendUrl = backendUrl;

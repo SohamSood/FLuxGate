@@ -6,6 +6,10 @@ package com.fluxgate.service;
 public class GatewayTimeoutException extends RuntimeException {
     private final String backendUrl;
 
+    public GatewayTimeoutException(String message, String backendUrl) {
+        this(message, backendUrl, null);
+    }
+
     public GatewayTimeoutException(String message, String backendUrl, Throwable cause) {
         super(message, cause);
         this.backendUrl = backendUrl;
