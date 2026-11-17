@@ -9,14 +9,12 @@ import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 
 import java.net.http.HttpRequest;
-import java.util.Enumeration;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
+import java.util.*;
 
 /**
  * Utility methods for HTTP header parsing, client IP resolution,
- * hop-by-hop header stripping (RFC 7230 §6.1), and proxy response decoration.
+ * request tracing ID generation, hop-by-hop header stripping (RFC 7230 §6.1),
+ * security header injection, and proxy response decoration.
  */
 public final class ProxyHeaderUtils {
 
@@ -56,6 +54,20 @@ public final class ProxyHeaderUtils {
     }
 
     /**
+     * Resolves or generates a unique correlation request ID for distributed tracing.
+     */
+    public static String resolveRequestId(HttpServletRequest request) {
+        String id = request.getHeader("X-Request-Id");
+        if (id == null || id.isBlank()) {
+            id = request.getHeader("X-Correlation-Id");
+        }
+        if (id == null || id.isBlank()) {
+            id = UUID.randomUUID().toString();
+        }
+        return id.trim();
+    }
+
+    /**
      * Detects whether the client explicitly requested cache bypass via Cache-Control or Pragma headers.
      */
     public static boolean isBypassCacheRequested(HttpServletRequest request) {
@@ -84,9 +96,13 @@ public final class ProxyHeaderUtils {
 
     /**
      * Copies allowable incoming request headers to the upstream HttpRequest builder,
-     * stripping hop-by-hop headers and adding standard X-Forwarded-* headers.
+     * stripping hop-by-hop headers and adding standard X-Forwarded-* and X-Request-Id headers.
      */
     public static void copyRequestHeaders(HttpServletRequest request, HttpRequest.Builder builder, BackendServer backend) {
+        copyRequestHeaders(request, builder, backend, resolveRequestId(request));
+    }
+
+    public static void copyRequestHeaders(HttpServletRequest request, HttpRequest.Builder builder, BackendServer backend, String requestId) {
         Enumeration<String> headerNames = request.getHeaderNames();
         if (headerNames != null) {
             while (headerNames.hasMoreElements()) {
@@ -124,6 +140,9 @@ public final class ProxyHeaderUtils {
         builder.header("X-Forwarded-Proto", request.getScheme());
         builder.header("X-Forwarded-Host", request.getHeader("Host") != null ? request.getHeader("Host") : request.getServerName());
         builder.header("X-Forwarded-Port", String.valueOf(request.getServerPort()));
+        if (requestId != null && !requestId.isBlank()) {
+            builder.header("X-Request-Id", requestId);
+        }
     }
 
     /**
@@ -147,9 +166,35 @@ public final class ProxyHeaderUtils {
     }
 
     /**
+     * Injects standard enterprise gateway security headers.
+     */
+    public static void applySecurityHeaders(HttpHeaders headers, String requestId) {
+        if (requestId != null && !requestId.isBlank()) {
+            headers.set("X-Request-Id", requestId);
+        }
+        headers.set("X-Content-Type-Options", "nosniff");
+        headers.set("X-Frame-Options", "SAMEORIGIN");
+    }
+
+    /**
+     * Builds HTTP headers for a 403 Forbidden response (IP Access Control firewall).
+     */
+    public static HttpHeaders createForbiddenHeaders(String requestId) {
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        headers.set("X-Proxy-By", "FluxGate-Firewall");
+        applySecurityHeaders(headers, requestId);
+        return headers;
+    }
+
+    /**
      * Builds HTTP headers for a 429 Too Many Requests response.
      */
     public static HttpHeaders createRateLimitHeaders(RateLimitResult rateLimitResult) {
+        return createRateLimitHeaders(rateLimitResult, null);
+    }
+
+    public static HttpHeaders createRateLimitHeaders(RateLimitResult rateLimitResult, String requestId) {
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.APPLICATION_JSON);
         headers.set("Retry-After", String.valueOf(rateLimitResult.getResetSeconds()));
@@ -157,6 +202,7 @@ public final class ProxyHeaderUtils {
         headers.set("X-RateLimit-Remaining", "0");
         headers.set("X-RateLimit-Reset", String.valueOf(rateLimitResult.getResetSeconds()));
         headers.set("X-Proxy-By", "FluxGate-RateLimiter");
+        applySecurityHeaders(headers, requestId);
         return headers;
     }
 
@@ -164,6 +210,10 @@ public final class ProxyHeaderUtils {
      * Builds HTTP headers for a Cache HIT response.
      */
     public static HttpHeaders createCacheHitHeaders(CachedResponse cached, RateLimitResult rateLimitResult) {
+        return createCacheHitHeaders(cached, rateLimitResult, null);
+    }
+
+    public static HttpHeaders createCacheHitHeaders(CachedResponse cached, RateLimitResult rateLimitResult, String requestId) {
         HttpHeaders responseHeaders = new HttpHeaders();
         responseHeaders.addAll(cached.getHeaders());
         responseHeaders.set("X-Cache", "HIT");
@@ -175,6 +225,7 @@ public final class ProxyHeaderUtils {
         responseHeaders.set("X-RateLimit-Remaining", String.valueOf(rateLimitResult.getRemainingTokens()));
         responseHeaders.set("X-Circuit-Breaker", "BYPASS (Edge Cache)");
         responseHeaders.set("X-Failover-Attempts", "0");
+        applySecurityHeaders(responseHeaders, requestId);
         return responseHeaders;
     }
 
@@ -191,6 +242,24 @@ public final class ProxyHeaderUtils {
             int failoverAttempts,
             String failoverOrigin,
             String originBackend) {
+        return createProxiedResponseHeaders(
+                proxyResponse, cacheStatus, wasCoalesced, waiterCount,
+                rateLimitResult, circuitBreakerState, failoverAttempts,
+                failoverOrigin, originBackend, null
+        );
+    }
+
+    public static HttpHeaders createProxiedResponseHeaders(
+            ProxyResponse proxyResponse,
+            String cacheStatus,
+            boolean wasCoalesced,
+            int waiterCount,
+            RateLimitResult rateLimitResult,
+            String circuitBreakerState,
+            int failoverAttempts,
+            String failoverOrigin,
+            String originBackend,
+            String requestId) {
 
         HttpHeaders responseHeaders = new HttpHeaders();
         responseHeaders.addAll(proxyResponse.getHeaders());
@@ -205,6 +274,7 @@ public final class ProxyHeaderUtils {
             responseHeaders.set("X-Failover-Origin", failoverOrigin);
             responseHeaders.set("X-Failover-Target", originBackend);
         }
+        applySecurityHeaders(responseHeaders, requestId);
         return responseHeaders;
     }
 }

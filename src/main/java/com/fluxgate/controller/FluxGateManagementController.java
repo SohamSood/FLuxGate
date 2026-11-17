@@ -31,6 +31,7 @@ public class FluxGateManagementController {
     private final TrafficMetricsService trafficMetricsService;
     private final CircuitBreakerManager circuitBreakerManager;
     private final RequestCoalescingService requestCoalescingService;
+    private final com.fluxgate.service.IpAccessControlService ipAccessControlService;
 
     public FluxGateManagementController(BackendRegistry backendRegistry,
                                         HealthCheckService healthCheckService,
@@ -39,7 +40,8 @@ public class FluxGateManagementController {
                                         ResponseCacheService responseCacheService,
                                         TrafficMetricsService trafficMetricsService,
                                         CircuitBreakerManager circuitBreakerManager,
-                                        RequestCoalescingService requestCoalescingService) {
+                                        RequestCoalescingService requestCoalescingService,
+                                        com.fluxgate.service.IpAccessControlService ipAccessControlService) {
         this.backendRegistry = backendRegistry;
         this.healthCheckService = healthCheckService;
         this.strategyManager = strategyManager;
@@ -48,6 +50,7 @@ public class FluxGateManagementController {
         this.trafficMetricsService = trafficMetricsService;
         this.circuitBreakerManager = circuitBreakerManager;
         this.requestCoalescingService = requestCoalescingService;
+        this.ipAccessControlService = ipAccessControlService;
     }
 
     /**
@@ -70,6 +73,8 @@ public class FluxGateManagementController {
         response.put("upstreamCallsSaved", requestCoalescingService.getUpstreamCallsSaved());
         response.put("circuitBreakersOpen", circuitBreakerManager.getTelemetry().get("openCircuits"));
         response.put("circuitBreakerEnabled", circuitBreakerManager.isEnabled());
+        response.put("ipFilterEnabled", ipAccessControlService.isEnabled());
+        response.put("blockedIpsCount", ipAccessControlService.getBlockedIps().size());
 
         return ResponseEntity.ok(response);
     }
@@ -98,6 +103,10 @@ public class FluxGateManagementController {
         response.put("cache", responseCacheService.getStats());
         response.put("coalescing", requestCoalescingService.getStats());
         response.put("circuitBreakers", circuitBreakerManager.getTelemetry());
+        response.put("ipFilter", Map.of(
+                "enabled", ipAccessControlService.isEnabled(),
+                "blockedIps", ipAccessControlService.getBlockedIps()
+        ));
         response.put("metrics", Map.of(
                 "totalRequests", trafficMetricsService.getTotalRequests(),
                 "averageLatencyMs", trafficMetricsService.getAverageLatencyMs(),
@@ -437,6 +446,44 @@ public class FluxGateManagementController {
         return ResponseEntity.ok(Map.of(
                 "message", "Circuit breaker enabled status updated",
                 "enabled", circuitBreakerManager.isEnabled()
+        ));
+    }
+
+    /**
+     * Retrieves IP Access Control firewall status and blocked IPs list.
+     */
+    @GetMapping("/ip-filter")
+    public ResponseEntity<Map<String, Object>> getIpFilter() {
+        return ResponseEntity.ok(Map.of(
+                "enabled", ipAccessControlService.isEnabled(),
+                "blockedIps", ipAccessControlService.getBlockedIps(),
+                "allowedIps", ipAccessControlService.getAllowedIps()
+        ));
+    }
+
+    /**
+     * Dynamically blocks a client IP address.
+     */
+    @PostMapping("/ip-filter/block")
+    public ResponseEntity<Map<String, Object>> blockIp(@RequestParam String ip) {
+        boolean added = ipAccessControlService.blockIp(ip);
+        return ResponseEntity.ok(Map.of(
+                "message", added ? "Client IP blocked successfully" : "IP was already blocked or invalid",
+                "ip", ip,
+                "blocked", added
+        ));
+    }
+
+    /**
+     * Dynamically unblocks a client IP address.
+     */
+    @PostMapping("/ip-filter/unblock")
+    public ResponseEntity<Map<String, Object>> unblockIp(@RequestParam String ip) {
+        boolean removed = ipAccessControlService.unblockIp(ip);
+        return ResponseEntity.ok(Map.of(
+                "message", removed ? "Client IP unblocked successfully" : "IP was not in blocklist",
+                "ip", ip,
+                "unblocked", removed
         ));
     }
 }

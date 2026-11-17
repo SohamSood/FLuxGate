@@ -49,6 +49,9 @@ class ProxyIntegrationTest {
     @Autowired
     private com.fluxgate.service.RequestCoalescingService requestCoalescingService;
 
+    @Autowired
+    private com.fluxgate.service.IpAccessControlService ipAccessControlService;
+
     private static HttpServer server1;
     private static HttpServer server2;
     private static HttpServer server3;
@@ -83,6 +86,10 @@ class ProxyIntegrationTest {
         if (responseCacheService != null) {
             responseCacheService.clear();
             responseCacheService.setEnabled(false);
+        }
+        if (ipAccessControlService != null) {
+            ipAccessControlService.clear();
+            ipAccessControlService.setEnabled(true);
         }
 
         server1HitCount.set(0);
@@ -291,5 +298,42 @@ class ProxyIntegrationTest {
         assertEquals(HttpStatus.OK, coalResp.getStatusCode());
         assertEquals(true, coalResp.getBody().get("enabled"));
         assertTrue((Integer) coalResp.getBody().get("totalInitiatedRequests") >= 1);
+    }
+
+    @Test
+    @DisplayName("Should generate or preserve X-Request-Id and inject security headers")
+    void testRequestIdAndSecurityHeaders() {
+        HttpHeaders headers = new HttpHeaders();
+        headers.set("X-Request-Id", "custom-trace-id-101");
+
+        ResponseEntity<String> response = restTemplate.exchange(
+                getBaseUrl() + "/api/echo?trace=true",
+                HttpMethod.GET,
+                new HttpEntity<>(headers),
+                String.class
+        );
+
+        assertEquals(HttpStatus.OK, response.getStatusCode());
+        assertEquals("custom-trace-id-101", response.getHeaders().getFirst("X-Request-Id"));
+        assertEquals("nosniff", response.getHeaders().getFirst("X-Content-Type-Options"));
+        assertEquals("SAMEORIGIN", response.getHeaders().getFirst("X-Frame-Options"));
+    }
+
+    @Test
+    @DisplayName("Should block forbidden IPs via IP Access Control firewall")
+    void testIpAccessControlFirewall() {
+        // Block 127.0.0.1
+        ipAccessControlService.blockIp("127.0.0.1");
+
+        ResponseEntity<Map> response = restTemplate.getForEntity(getBaseUrl() + "/api/echo", Map.class);
+        assertEquals(HttpStatus.FORBIDDEN, response.getStatusCode());
+        assertEquals("Forbidden", response.getBody().get("error"));
+        assertNotNull(response.getHeaders().getFirst("X-Request-Id"));
+
+        // Unblock 127.0.0.1
+        ipAccessControlService.unblockIp("127.0.0.1");
+
+        ResponseEntity<String> unblockedResp = restTemplate.getForEntity(getBaseUrl() + "/api/echo", String.class);
+        assertEquals(HttpStatus.OK, unblockedResp.getStatusCode());
     }
 }

@@ -38,6 +38,13 @@ public class ProxyService {
      * Forwards the incoming request to the chosen backend server.
      */
     public ProxyResponse forward(HttpServletRequest request, byte[] body, BackendServer backend) {
+        return forward(request, body, backend, ProxyHeaderUtils.resolveRequestId(request));
+    }
+
+    /**
+     * Forwards the incoming request with distributed tracing correlation ID.
+     */
+    public ProxyResponse forward(HttpServletRequest request, byte[] body, BackendServer backend, String requestId) {
         String method = request.getMethod();
         String requestUri = request.getRequestURI();
         String queryString = request.getQueryString();
@@ -52,8 +59,8 @@ public class ProxyService {
                     .uri(URI.create(targetUrl))
                     .timeout(Duration.ofMillis(properties.getProxy().getReadTimeoutMs()));
 
-            // Copy allowed headers and inject standard X-Forwarded-* headers
-            ProxyHeaderUtils.copyRequestHeaders(request, requestBuilder, backend);
+            // Copy allowed headers and inject standard X-Forwarded-* and X-Request-Id headers
+            ProxyHeaderUtils.copyRequestHeaders(request, requestBuilder, backend, requestId);
 
             // Set HTTP method and body payload
             setMethodAndBody(requestBuilder, method, body);
@@ -70,8 +77,8 @@ public class ProxyService {
             responseHeaders.set("X-Upstream-Backend", backend.getUrl());
             responseHeaders.set("X-Proxy-Latency", latencyMs + "ms");
 
-            log.info("[PROXY] Method={} Path={} Query={} Backend={} Status={} Latency={}ms",
-                    method, requestUri, (queryString != null ? queryString : "-"), backend.getUrl(), statusCode, latencyMs);
+            log.info("[PROXY] RequestId={} Method={} Path={} Query={} Backend={} Status={} Latency={}ms",
+                    requestId, method, requestUri, (queryString != null ? queryString : "-"), backend.getUrl(), statusCode, latencyMs);
 
             return new ProxyResponse(statusCode, responseHeaders, upstreamResponse.body(), latencyMs);
 

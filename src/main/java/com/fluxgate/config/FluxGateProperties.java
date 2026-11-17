@@ -27,6 +27,7 @@ public class FluxGateProperties {
     private Cache cache = new Cache();
     private CircuitBreaker circuitBreaker = new CircuitBreaker();
     private Coalescing coalescing = new Coalescing();
+    private Security security = new Security();
 
     public List<String> getBackends() {
         return backends;
@@ -90,6 +91,14 @@ public class FluxGateProperties {
 
     public void setCoalescing(Coalescing coalescing) {
         this.coalescing = coalescing;
+    }
+
+    public Security getSecurity() {
+        return security;
+    }
+
+    public void setSecurity(Security security) {
+        this.security = security;
     }
 
     public static class DemoBackends {
@@ -281,6 +290,36 @@ public class FluxGateProperties {
 
         public void setTimeoutMs(long timeoutMs) {
             this.timeoutMs = timeoutMs;
+        }
+    }
+
+    public static class Security {
+        private boolean enabled = true;
+        private List<String> blockedIps = new ArrayList<>();
+        private List<String> allowedIps = new ArrayList<>();
+
+        public boolean isEnabled() {
+            return enabled;
+        }
+
+        public void setEnabled(boolean enabled) {
+            this.enabled = enabled;
+        }
+
+        public List<String> getBlockedIps() {
+            return blockedIps;
+        }
+
+        public void setBlockedIps(List<String> blockedIps) {
+            this.blockedIps = blockedIps;
+        }
+
+        public List<String> getAllowedIps() {
+            return allowedIps;
+        }
+
+        public void setAllowedIps(List<String> allowedIps) {
+            this.allowedIps = allowedIps;
         }
     }
 }

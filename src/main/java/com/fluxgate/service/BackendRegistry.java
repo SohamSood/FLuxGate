@@ -51,13 +51,14 @@ public class BackendRegistry {
         if (rawUrl == null || rawUrl.isBlank()) {
             throw new IllegalArgumentException("Backend URL cannot be blank");
         }
-        BackendServer newServer = new BackendServer(rawUrl, true, weight);
+        String cleanUrl = BackendServer.sanitizeUrl(rawUrl);
         for (BackendServer existing : backends) {
-            if (existing.getUrl().equalsIgnoreCase(newServer.getUrl())) {
+            if (existing.getUrl().equalsIgnoreCase(cleanUrl)) {
                 existing.setWeight(weight);
                 return existing;
             }
         }
+        BackendServer newServer = new BackendServer(cleanUrl, true, weight);
         backends.add(newServer);
         log.info("Registered new backend: {} (weight={})", newServer.getUrl(), newServer.getWeight());
         return newServer;
@@ -83,18 +84,12 @@ public class BackendRegistry {
         if (rawUrl == null || rawUrl.isBlank()) {
             return false;
         }
-        String sanitized = rawUrl.trim();
-        while (sanitized.endsWith("/")) {
-            sanitized = sanitized.substring(0, sanitized.length() - 1);
+        String sanitized = BackendServer.sanitizeUrl(rawUrl);
+        boolean removed = backends.removeIf(server -> server.getUrl().equalsIgnoreCase(sanitized));
+        if (removed) {
+            log.info("Deregistered backend: {}", sanitized);
         }
-        for (BackendServer server : backends) {
-            if (server.getUrl().equalsIgnoreCase(sanitized)) {
-                backends.remove(server);
-                log.info("Deregistered backend: {}", sanitized);
-                return true;
-            }
-        }
-        return false;
+        return removed;
     }
 
     public List<BackendServer> getAllBackends() {
@@ -106,17 +101,11 @@ public class BackendRegistry {
     }
 
     public Optional<BackendServer> findByUrl(String url) {
-        if (url == null) return Optional.empty();
-        String sanitized = url.trim();
-        while (sanitized.endsWith("/")) {
-            sanitized = sanitized.substring(0, sanitized.length() - 1);
-        }
-        for (BackendServer server : backends) {
-            if (server.getUrl().equalsIgnoreCase(sanitized)) {
-                return Optional.of(server);
-            }
-        }
-        return Optional.empty();
+        if (url == null || url.isBlank()) return Optional.empty();
+        String sanitized = BackendServer.sanitizeUrl(url);
+        return backends.stream()
+                .filter(server -> server.getUrl().equalsIgnoreCase(sanitized))
+                .findFirst();
     }
 
     public int size() {

@@ -9,7 +9,6 @@ import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpHeaders;
 import org.springframework.mock.web.MockHttpServletRequest;
 
-import java.net.http.HttpRequest;
 import java.util.List;
 import java.util.Map;
 
@@ -47,6 +46,23 @@ class ProxyHeaderUtilsTest {
 
         String ip = ProxyHeaderUtils.extractClientIp(request);
         assertEquals("192.168.1.50", ip);
+    }
+
+    @Test
+    @DisplayName("Should resolve existing X-Request-Id or generate new UUID")
+    void testResolveRequestId() {
+        MockHttpServletRequest reqWithId = new MockHttpServletRequest();
+        reqWithId.addHeader("X-Request-Id", "custom-req-12345");
+        assertEquals("custom-req-12345", ProxyHeaderUtils.resolveRequestId(reqWithId));
+
+        MockHttpServletRequest reqWithCorr = new MockHttpServletRequest();
+        reqWithCorr.addHeader("X-Correlation-Id", "corr-999");
+        assertEquals("corr-999", ProxyHeaderUtils.resolveRequestId(reqWithCorr));
+
+        MockHttpServletRequest emptyReq = new MockHttpServletRequest();
+        String generated = ProxyHeaderUtils.resolveRequestId(emptyReq);
+        assertNotNull(generated);
+        assertFalse(generated.isBlank());
     }
 
     @Test
@@ -96,26 +112,38 @@ class ProxyHeaderUtilsTest {
     }
 
     @Test
-    @DisplayName("Should create rate limit error headers with proper metadata")
+    @DisplayName("Should create rate limit error headers with proper metadata and security headers")
     void testCreateRateLimitHeaders() {
         RateLimitResult result = new RateLimitResult(false, 0, 100, 30, "10.0.0.1");
-        HttpHeaders headers = ProxyHeaderUtils.createRateLimitHeaders(result);
+        HttpHeaders headers = ProxyHeaderUtils.createRateLimitHeaders(result, "req-123");
 
         assertEquals("30", headers.getFirst("Retry-After"));
         assertEquals("100", headers.getFirst("X-RateLimit-Limit"));
         assertEquals("0", headers.getFirst("X-RateLimit-Remaining"));
         assertEquals("FluxGate-RateLimiter", headers.getFirst("X-Proxy-By"));
+        assertEquals("req-123", headers.getFirst("X-Request-Id"));
+        assertEquals("nosniff", headers.getFirst("X-Content-Type-Options"));
     }
 
     @Test
-    @DisplayName("Should enrich proxied response headers with failover and circuit breaker telemetry")
+    @DisplayName("Should create forbidden headers for IP firewall with request ID and security headers")
+    void testCreateForbiddenHeaders() {
+        HttpHeaders headers = ProxyHeaderUtils.createForbiddenHeaders("req-block-456");
+        assertEquals("FluxGate-Firewall", headers.getFirst("X-Proxy-By"));
+        assertEquals("req-block-456", headers.getFirst("X-Request-Id"));
+        assertEquals("nosniff", headers.getFirst("X-Content-Type-Options"));
+        assertEquals("SAMEORIGIN", headers.getFirst("X-Frame-Options"));
+    }
+
+    @Test
+    @DisplayName("Should enrich proxied response headers with failover, circuit breaker telemetry, and tracing")
     void testCreateProxiedResponseHeaders() {
         ProxyResponse proxyResp = new ProxyResponse(200, new HttpHeaders(), new byte[0], 42);
         RateLimitResult rateLimitResult = new RateLimitResult(true, 59, 60, 0, "10.0.0.1");
 
         HttpHeaders headers = ProxyHeaderUtils.createProxiedResponseHeaders(
                 proxyResp, "MISS", false, 0, rateLimitResult,
-                "CLOSED", 1, "http://bad-backend:8081", "http://good-backend:8082"
+                "CLOSED", 1, "http://bad-backend:8081", "http://good-backend:8082", "req-xyz"
         );
 
         assertEquals("MISS", headers.getFirst("X-Cache"));
@@ -124,5 +152,8 @@ class ProxyHeaderUtilsTest {
         assertEquals("1", headers.getFirst("X-Failover-Attempts"));
         assertEquals("http://bad-backend:8081", headers.getFirst("X-Failover-Origin"));
         assertEquals("http://good-backend:8082", headers.getFirst("X-Failover-Target"));
+        assertEquals("req-xyz", headers.getFirst("X-Request-Id"));
+        assertEquals("nosniff", headers.getFirst("X-Content-Type-Options"));
+        assertEquals("SAMEORIGIN", headers.getFirst("X-Frame-Options"));
     }
 }

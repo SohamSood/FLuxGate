@@ -5,6 +5,7 @@ import com.fluxgate.model.ProxyPipelineResult;
 import com.fluxgate.model.ProxyResponse;
 import com.fluxgate.resilience.CircuitBreakerManager;
 import com.fluxgate.strategy.LoadBalancingStrategy;
+import com.fluxgate.util.ProxyHeaderUtils;
 import jakarta.servlet.http.HttpServletRequest;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -44,26 +45,35 @@ public class ProxyExecutionPipeline {
         this.requestCoalescingService = requestCoalescingService;
     }
 
-    /**
-     * Dispatches an incoming request through coalescing (if idempotent) or direct execution,
-     * managing failovers, circuit state, and edge cache.
-     */
     public ProxyPipelineResult dispatch(HttpServletRequest request,
                                        byte[] body,
                                        String cacheKey,
                                        boolean isCacheableMethod,
                                        boolean cacheBypassRequested) {
+        return dispatch(request, body, cacheKey, isCacheableMethod, cacheBypassRequested, ProxyHeaderUtils.resolveRequestId(request));
+    }
+
+    /**
+     * Dispatches an incoming request through coalescing (if idempotent) or direct execution,
+     * managing failovers, circuit state, distributed tracing, and edge cache.
+     */
+    public ProxyPipelineResult dispatch(HttpServletRequest request,
+                                       byte[] body,
+                                       String cacheKey,
+                                       boolean isCacheableMethod,
+                                       boolean cacheBypassRequested,
+                                       String requestId) {
 
         RequestCoalescingService.CoalescedResult coalescedResult;
 
         if (isCacheableMethod) {
             coalescedResult = requestCoalescingService.execute(cacheKey,
-                    () -> executeWithFailover(request, body, cacheKey, true));
+                    () -> executeWithFailover(request, body, cacheKey, true, requestId));
         } else {
             // State mutation: invalidate cache and dispatch directly without coalescing
             responseCacheService.invalidatePath(request.getRequestURI());
             RequestCoalescingService.CoalescedExecutionResult exec =
-                    executeWithFailover(request, body, cacheKey, false);
+                    executeWithFailover(request, body, cacheKey, false, requestId);
             coalescedResult = new RequestCoalescingService.CoalescedResult(
                     exec.getResponse(), false, 0, exec.getOriginBackend(),
                     exec.getFailoverAttempts(), exec.getFailoverOrigin()
@@ -112,7 +122,7 @@ public class ProxyExecutionPipeline {
      * Executes backend forwarding with automatic in-flight failover protection on upstream failures.
      */
     private RequestCoalescingService.CoalescedExecutionResult executeWithFailover(
-            HttpServletRequest request, byte[] body, String cacheKey, boolean isCacheableMethod) {
+            HttpServletRequest request, byte[] body, String cacheKey, boolean isCacheableMethod, String requestId) {
 
         BackendServer backend = selectInitialBackend(request.getRequestURI());
 
@@ -131,7 +141,7 @@ public class ProxyExecutionPipeline {
         String failoverOrigin = null;
 
         try {
-            proxyResponse = proxyService.forward(request, body, activeBackend);
+            proxyResponse = proxyService.forward(request, body, activeBackend, requestId);
 
             // Upstream 5xx: record failure and attempt failover
             if (proxyResponse.getStatusCode() >= 500) {
@@ -147,7 +157,7 @@ public class ProxyExecutionPipeline {
                     circuitBreakerManager.recordFailover(failoverOrigin);
                     log.warn("[IN-FLIGHT FAILOVER] Backend {} returned 5xx. Transparently rerouting request to alternate backend {}",
                             failoverOrigin, activeBackend.getUrl());
-                    proxyResponse = proxyService.forward(request, body, activeBackend);
+                    proxyResponse = proxyService.forward(request, body, activeBackend, requestId);
                 }
             }
         } catch (BadGatewayException | GatewayTimeoutException ex) {
@@ -163,7 +173,7 @@ public class ProxyExecutionPipeline {
                 circuitBreakerManager.recordFailover(failoverOrigin);
                 log.warn("[IN-FLIGHT FAILOVER] Backend {} failed ({}). Transparently rerouting request to alternate backend {}",
                         failoverOrigin, failureReason, activeBackend.getUrl());
-                proxyResponse = proxyService.forward(request, body, activeBackend);
+                proxyResponse = proxyService.forward(request, body, activeBackend, requestId);
             } else {
                 throw ex;
             }
@@ -212,9 +222,6 @@ public class ProxyExecutionPipeline {
                 .filter(b -> !b.getUrl().equalsIgnoreCase(failedBackend.getUrl()))
                 .filter(b -> circuitBreakerManager.isRequestPermitted(b.getUrl()))
                 .toList();
-        if (!candidates.isEmpty()) {
-            return loadBalancingStrategy.select(candidates);
-        }
-        return Optional.empty();
+        return candidates.isEmpty() ? Optional.empty() : loadBalancingStrategy.select(candidates);
     }
 }

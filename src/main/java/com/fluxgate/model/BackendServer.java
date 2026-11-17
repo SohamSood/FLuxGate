@@ -40,7 +40,7 @@ public class BackendServer {
         this.lastCheckedAt = System.currentTimeMillis();
     }
 
-    private static String sanitizeUrl(String raw) {
+    public static String sanitizeUrl(String raw) {
         Objects.requireNonNull(raw, "Backend URL must not be null");
         String trimmed = raw.trim();
         while (trimmed.endsWith("/")) {
